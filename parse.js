@@ -932,6 +932,10 @@ function blockSkipDestEnd(text, p) {
 // is replaced with '++'. Positions in the result match the original text,
 // so the blockSkip scan below can run on it directly.
 function otMaskedText(text) {
+  // Fast path: the Ot mask only changes backslash-escaped punctuation
+  // and backticks inside code spans. With neither present it is the
+  // identity — skip the split/join entirely.
+  if (!text.includes('`') && !text.includes('\\')) return text;
   const chars = text.split('');
   const n = chars.length;
   let i = 0;
