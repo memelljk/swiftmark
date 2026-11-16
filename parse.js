@@ -2666,15 +2666,17 @@ function parseList(lines, i, end, refs) {
 
 /* --- tables (GFM) --- */
 
-// Split a table row line into cells. A '|' preceded by an ODD number of
-// backslashes is an escaped literal pipe; an even number means the pipe
-// splits the row. Leading/trailing pipes are dropped (same parity rule).
+// Split a table row into its cells. Whether a '|' splits depends on the
+// backslashes before it: an ODD count makes it an escaped literal pipe
+// (one backslash is consumed), an EVEN count means it splits. The
+// leading and trailing pipes of the row are dropped under the same
+// parity rule.
 function splitTableRow(b) {
   let row = b.trim();
   if (row.startsWith('|')) row = row.slice(1);
   if (row.endsWith('|')) {
     let slashes = 0;
-    for (let p = row.length - 2; p >= 0 && row[p] === '\\'; p--) slashes++;
+    for (let p = row.length - 2; p >= 0 && row[p] === '\\'; p--) slashes += 1;
     if (slashes % 2 === 0) row = row.slice(0, -1);
   }
   const cells = [];
@@ -2682,13 +2684,18 @@ function splitTableRow(b) {
   for (let p = 0; p < row.length; p++) {
     const c = row[p];
     if (c === '\\') {
-      let slashes = 0;
-      while (p + slashes < row.length && row[p + slashes] === '\\') slashes++;
-      if (p + slashes < row.length && row[p + slashes] === '|') {
-        if (slashes % 2 === 1) { cell += '\\'.repeat(slashes - 1) + '|'; p += slashes; continue; }
-        cell += '\\'.repeat(slashes); p += slashes - 1; continue;
+      // Consume the whole backslash run at once and decide by parity.
+      let run = 0;
+      while (p + run < row.length && row[p + run] === '\\') run += 1;
+      const afterRun = row[p + run];
+      if (afterRun === '|' && run % 2 === 1) {
+        cell += '\\'.repeat(run - 1) + '|';
+        p += run;
+      } else {
+        cell += '\\'.repeat(run);
+        p += run - 1;
       }
-      cell += '\\'.repeat(slashes); p += slashes - 1; continue;
+      continue;
     }
     if (c === '|') { cells.push(cell.trim()); cell = ''; continue; }
     cell += c;
@@ -2697,21 +2704,25 @@ function splitTableRow(b) {
   return cells;
 }
 
-// Parse a delimiter row; returns the alignment array or null.
+// Parse a delimiter row into its alignment array ('left' / 'center' /
+// 'right' / null per column), or return null when any cell is not a
+// valid delimiter cell.
 function parseDelimiterRow(b) {
-  const cells = splitTableRow(b);
   const aligns = [];
-  for (const cell of cells) {
+  for (const cell of splitTableRow(b)) {
     const hit = /^(:?)-+(:?)$/.exec(cell);
     if (!hit) return null;
-    aligns.push(hit[1] === ':' && hit[2] === ':' ? 'center' : hit[1] === ':' ? 'left' : hit[2] === ':' ? 'right' : null);
+    if (hit[1] === ':' && hit[2] === ':') aligns.push('center');
+    else if (hit[1] === ':') aligns.push('left');
+    else if (hit[2] === ':') aligns.push('right');
+    else aligns.push(null);
   }
   return aligns;
 }
 
-// Does b1 + b2 match the table regex's header+delimiter pattern (no cell
-// count or delimiter-content check — that is what the paragraph lookahead
-// uses, so a bare '---' delimiter still stops a paragraph).
+// Do b1 + b2 have the SHAPE of a table header plus delimiter row? No
+// cell-count or delimiter-content check — this is the paragraph
+// lookahead test, so even a bare '---' delimiter stops a paragraph.
 function isTableCandidate(b1, b2) {
   if (b1.trim() === '') return false;
   const cells = splitTableRow(b2);
@@ -2722,28 +2733,28 @@ function isTableCandidate(b1, b2) {
   return true;
 }
 
-// A table actually starts here: header+delimiter pattern, the delimiter
-// row contains ':' or '|' (marked's tableDelimiter), and the cell counts
-// match.
+// A table really starts here: the candidate shape, a ':' or '|' in the
+// delimiter row (marked's tableDelimiter requirement), and matching
+// cell counts.
 function isTableHeader(b1, b2) {
   if (!isTableCandidate(b1, b2)) return false;
   if (!/[:|]/.test(b2)) return false;
-  const head = splitTableRow(b1);
   const aligns = parseDelimiterRow(b2);
-  return aligns !== null && aligns.length === head.length;
+  return aligns !== null && aligns.length === splitTableRow(b1).length;
 }
 
-// Whitespace-only line that marked's table-body regex still consumes as
-// an (empty) row: its blank check is ` *\n` (spaces only — a tab does not
-// match), and its indented-code check needs a character after the indent,
-// so a line of <=3 spaces + a trailing tab is a row, not a table end.
+// A whitespace-only line that marked's table-body pattern still
+// consumes as an (empty) row: its blank check is ` *\n` — spaces only,
+// a tab does not match — and its indented-code check needs a character
+// after the indent, so a line of at most 3 spaces plus one trailing tab
+// is a row, not the end of the table.
 function isTableBlankRow(b) {
   if (!b) return false;
   let spaces = 0;
-  while (spaces < b.length && b[spaces] === ' ') spaces++;
-  if (spaces === b.length) return false; // spaces-only: blank
-  if (spaces >= 4) return false; // 4-space indent: code
-  return spaces + 1 === b.length; // tab must be the last character
+  while (spaces < b.length && b[spaces] === ' ') spaces += 1;
+  if (spaces === b.length) return false; // spaces only: truly blank
+  if (spaces >= 4) return false; // 4-space indent: code, not a row
+  return spaces + 1 === b.length && b[spaces] === '\t';
 }
 
 function parseTable(lines, i, end) {
@@ -2754,7 +2765,7 @@ function parseTable(lines, i, end) {
   while (q < end) {
     const line = lines[q];
     if (isBlank(line)) {
-      if (isTableBlankRow(body(line))) { rows.push(splitTableRow(body(line))); q++; continue; }
+      if (isTableBlankRow(body(line))) { rows.push(splitTableRow(body(line))); q += 1; continue; }
       break;
     }
     const rowBody = body(line);
@@ -2765,8 +2776,9 @@ function parseTable(lines, i, end) {
     const marker = matchListStart(rowBody);
     if (marker && listInterruptsPara(marker, rowBody)) break;
     rows.push(splitTableRow(rowBody));
-    q++;
+    q += 1;
   }
+  // Normalise every row to the header's width.
   for (const row of rows) {
     while (row.length < head.length) row.push('');
     if (row.length > head.length) row.length = head.length;
@@ -2774,117 +2786,131 @@ function parseTable(lines, i, end) {
   return { block: { t: 'table', align: aligns, head, rows }, next: q };
 }
 
-/* --- paragraph, setext, link-reference definitions --- */
+/* --- paragraphs, setext headings, link reference definitions --- */
 
+// The setext level of a line: 1 for an '=' underline, 2 for '-', else 0.
 function setextLevel(b) {
-  let p = 0;
-  while (p < b.length && b[p] === ' ' && p < 3) p++;
-  if (p >= b.length) return 0;
-  const mark = b[p];
+  const indent = leadingSpacesUpTo3(b);
+  if (indent >= b.length) return 0;
+  const mark = b[indent];
   if (mark !== '=' && mark !== '-') return 0;
-  let q = p;
-  while (q < b.length && b[q] === mark) q++;
-  while (q < b.length && (b[q] === ' ' || b[q] === '\t')) q++;
+  let q = indent;
+  while (q < b.length && b[q] === mark) q += 1;
+  while (q < b.length && (b[q] === ' ' || b[q] === '\t')) q += 1;
   if (q !== b.length) return 0;
   return mark === '=' ? 1 : 2;
 }
 
-// Try to parse a link-reference definition starting at lines[i].
-// Returns {label, href, title, next} or null. The label may span lines;
-// the destination and title may be on following lines; a definition
+// Try to read a link reference definition starting at lines[i]. Returns
+// { label, href, title, next } or null. The label may span lines, and
+// the destination and title may sit on following lines; a definition
 // never spans a blank line.
 function tryDef(lines, i, end) {
-  // join the following non-blank lines into one string to parse
+  // Join the following non-blank lines (at most 50) into one string and
+  // parse that, remembering where each line starts so the result can
+  // be mapped back to a line count.
   const parts = [];
   let q = i;
-  while (q < end && !isBlank(lines[q]) && parts.length < 50) { parts.push(body(lines[q])); q++; }
+  while (q < end && !isBlank(lines[q]) && parts.length < 50) { parts.push(body(lines[q])); q += 1; }
   if (parts.length === 0) return null;
   const s = parts.join('\n');
-  const starts = [0];
-  for (let r = 0; r < parts.length; r++) starts.push(starts[r] + parts[r].length + 1);
-  const lineAt = (off) => {
+  const lineStarts = [0];
+  for (let r = 0; r < parts.length; r++) lineStarts.push(lineStarts[r] + parts[r].length + 1);
+  const lineIndexAt = (offset) => {
     let r = 0;
-    while (r + 1 < starts.length && starts[r + 1] <= off) r++;
+    while (r + 1 < lineStarts.length && lineStarts[r + 1] <= offset) r += 1;
     return r;
   };
-  let p = 0;
-  while (p < s.length && s[p] === ' ' && p < 3) p++;
+  const isEscapedAt = (p) =>
+    s[p] === '\\' && p + 1 < s.length && isAsciiPunct(s.charCodeAt(p + 1));
+  let p = leadingSpacesUpTo3(s);
   if (s[p] !== '[') return null;
   const labelMatch = parseLabel(s, p);
   if (!labelMatch) return null;
   const label = labelMatch.label;
   if (label === '' || normLabel(label) === '') return null;
   let cur = labelMatch.next;
-  // ']' must be followed immediately by ':' (no whitespace between)
+  // The ':' must follow the ']' immediately — no whitespace between.
   if (s[cur] !== ':') return null;
-  cur++;
-  // spaces only (no tab) before the destination; it may be on the next
-  // line (newline + spaces/tabs)
-  while (cur < s.length && s[cur] === ' ') cur++;
+  cur += 1;
+  // Spaces only (no tab) may precede the destination on its line; the
+  // destination may also sit on the next line (newline + spaces/tabs).
+  while (cur < s.length && s[cur] === ' ') cur += 1;
   if (cur < s.length && s[cur] === '\n') {
-    cur++;
-    while (cur < s.length && (s[cur] === ' ' || s[cur] === '\t')) cur++;
+    cur += 1;
+    while (cur < s.length && (s[cur] === ' ' || s[cur] === '\t')) cur += 1;
   }
   if (cur >= s.length) return null;
   let dest = '';
   if (s[cur] === '<') {
     let r = cur + 1;
     while (r < s.length && s[r] !== '\n' && s[r] !== '>') {
-      if (s[r] === '\\' && r + 1 < s.length && isAsciiPunct(s.charCodeAt(r + 1))) { dest += s[r + 1]; r += 2; }
-      else { dest += s[r]; r++; }
+      if (isEscapedAt(r)) { dest += s[r + 1]; r += 2; }
+      else { dest += s[r]; r += 1; }
     }
     if (r >= s.length || s[r] !== '>') return null;
     cur = r + 1;
   } else {
-    let r = cur, depth = 0;
+    let r = cur;
+    let depth = 0;
     while (r < s.length) {
       const c = s[r];
-      if (c === '\\' && r + 1 < s.length && isAsciiPunct(s.charCodeAt(r + 1))) { dest += s[r + 1]; r += 2; continue; }
+      if (isEscapedAt(r)) { dest += s[r + 1]; r += 2; continue; }
       if (c === ' ' || c === '\t' || c === '\n') break;
-      if (c === '(') depth++;
-      if (c === ')') { if (depth === 0) break; depth--; }
-      dest += c; r++;
+      if (c === '(') depth += 1;
+      if (c === ')') {
+        if (depth === 0) break;
+        depth -= 1;
+      }
+      dest += c;
+      r += 1;
     }
     if (dest === '' || depth !== 0) return null;
     cur = r;
   }
-  // optional title (must be preceded by whitespace)
+  // An optional title, which must be preceded by whitespace (possibly
+  // including one newline).
   let title = null;
-  let tq = cur, sawSpace = false;
-  while (tq < s.length && (s[tq] === ' ' || s[tq] === '\t')) { tq++; sawSpace = true; }
+  let tq = cur;
+  let sawSpace = false;
+  while (tq < s.length && (s[tq] === ' ' || s[tq] === '\t')) { tq += 1; sawSpace = true; }
   if (tq < s.length && s[tq] === '\n') {
-    tq++;
-    while (tq < s.length && (s[tq] === ' ' || s[tq] === '\t')) tq++;
+    tq += 1;
+    while (tq < s.length && (s[tq] === ' ' || s[tq] === '\t')) tq += 1;
     sawSpace = true;
   }
   if (sawSpace && tq < s.length && (s[tq] === '"' || s[tq] === "'" || s[tq] === '(')) {
     const quote = s[tq];
     const closer = quote === '(' ? ')' : quote;
-    let titleText = '', r = tq + 1, ok = false;
+    let collected = '';
+    let r = tq + 1;
+    let closed = false;
     while (r < s.length) {
       const c = s[r];
-      if (c === '\\' && r + 1 < s.length && isAsciiPunct(s.charCodeAt(r + 1))) { titleText += s[r + 1]; r += 2; continue; }
-      if (c === closer) { ok = true; break; }
-      titleText += c; r++;
+      if (isEscapedAt(r)) { collected += s[r + 1]; r += 2; continue; }
+      if (c === closer) { closed = true; break; }
+      collected += c;
+      r += 1;
     }
-    if (ok) {
-      // only whitespace may follow the closing quote on its line
+    if (closed) {
+      // Only whitespace may follow the closing quote on its line.
       let tail = r + 1;
-      while (tail < s.length && (s[tail] === ' ' || s[tail] === '\t')) tail++;
-      if (tail >= s.length || s[tail] === '\n') { title = titleText; cur = tail; }
+      while (tail < s.length && (s[tail] === ' ' || s[tail] === '\t')) tail += 1;
+      if (tail >= s.length || s[tail] === '\n') { title = collected; cur = tail; }
     }
   }
-  // after dest/title, only spaces may remain, then a newline or the end
+  // After the destination/title, only spaces may remain on the line,
+  // then a newline or the end of the text.
   let tail = cur;
-  while (tail < s.length && (s[tail] === ' ' || s[tail] === '\t')) tail++;
+  while (tail < s.length && (s[tail] === ' ' || s[tail] === '\t')) tail += 1;
   if (tail < s.length && s[tail] !== '\n') return null;
-  return { label, href: dest, title, next: i + lineAt(tail) + 1 };
+  return { label, href: dest, title, next: i + lineIndexAt(tail) + 1 };
 }
 
-// True when a setext heading may not form over lines[j..k): some content
-// line after the first starts a block construct (marked's lheading content
-// restriction). The table pattern here requires a pipe — a bare '---'
-// delimiter line does not block.
+// May a setext heading NOT form over lines[j..k)? It may not when some
+// content line after the first starts a block construct (marked's
+// lheading content restriction). The table pattern here requires a
+// pipe — a bare '---' delimiter line does not block.
 function setextBlocked(lines, j, k) {
   for (let r = j + 1; r < k; r++) {
     const b = body(lines[r]);
@@ -2892,9 +2918,9 @@ function setextBlocked(lines, j, k) {
     if (/^ {0,3}<[^\n>]+>/.test(b)) return true;
     if (stripQuoteText(b) !== null) return true;
     if (indentCols(b) >= 4) return true;
-    // a list marker followed by a space (any bullet / any ordered number)
+    // A list marker followed by a space (any bullet, any number).
     if (/^ {0,3}(?:[*+-]|\d{1,9}[.)]) /.test(b)) return true;
-    // a table-delimiter-like line containing a pipe
+    // A table-delimiter-like line that contains a pipe.
     if (/^ {0,3}\|?(?:[:\- ]*\|)+[:\- ]*$/.test(b)) return true;
   }
   return false;
@@ -2902,51 +2928,54 @@ function setextBlocked(lines, j, k) {
 
 function parseParagraph(lines, i, end, refs, inner, inList) {
   let q = i;
-  // leading link-reference definitions
+  // Leading link reference definitions: consume as many as parse, and
+  // record each (the first definition of a label wins).
   while (q < end) {
     const def = tryDef(lines, q, end);
     if (!def) break;
-    if (!refs.has(normLabel(def.label))) refs.set(normLabel(def.label), { href: def.href, title: def.title });
+    const key = normLabel(def.label);
+    if (!refs.has(key)) refs.set(key, { href: def.href, title: def.title });
     q = def.next;
   }
   if (q >= end || isBlank(lines[q])) return { block: null, next: q };
   const firstLine = body(lines[q]);
-  // a table may start the paragraph position
+  // A table may start at the paragraph position.
   if (q + 1 < end && isTableHeader(firstLine, body(lines[q + 1]))) {
-    const table = parseTable(lines, q, end);
-    return { block: table.block, next: table.next };
+    return parseTable(lines, q, end);
   }
   if (startsInterruptBlock(firstLine, inList)) return { block: null, next: q };
+  // Gather the paragraph's lines, watching for the constructs that end
+  // it: a setext underline, a table header, an interrupting block.
   const paraLines = [];
   let r = q;
   while (r < end) {
     const b = body(lines[r]);
     if (isBlank(lines[r])) {
-      // a whitespace-only line is a continuation only when it is the last
-      // line of the range and has no trailing newline (an inner/container
-      // range's text has no trailing newline, so its last line qualifies).
-      // A truly empty line never counts.
-      if (r === end - 1 && paraLines.length > 0 && body(lines[r]) !== '' && (!hasNL(lines[r]) || inner)) {
+      // A whitespace-only line continues the paragraph only when it is
+      // the last line of the range and carries no trailing newline (an
+      // inner/container range's text has no trailing newline, so its
+      // last line qualifies). A truly empty line never counts.
+      if (r === end - 1 && paraLines.length > 0 && b !== '' && (!hasNL(lines[r]) || inner)) {
         paraLines.push(lines[r]);
-        r++;
+        r += 1;
       }
       break;
     }
     if (paraLines.length > 0) {
       const level = setextLevel(b);
       if (level && !setextBlocked(lines, q, r)) {
-        // a setext heading's content is the paragraph text trimmed
+        // A setext heading's content is the paragraph text, trimmed.
         const headingText = joinParaLines(paraLines).replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
         return { block: { t: 'head', level, text: headingText }, next: r + 1 };
       }
       if (r + 1 < end && isTableCandidate(b, body(lines[r + 1]))) {
-        // a table header candidate stops the paragraph — unless the
-        // delimiter line is a setext underline for the paragraph
-        // including this line
+        // A table header candidate stops the paragraph — unless the
+        // would-be delimiter line is really a setext underline for the
+        // paragraph including this line.
         const nextLine = body(lines[r + 1]);
         if (setextLevel(nextLine) > 0 && !setextBlocked(lines, q, r + 1)) {
           paraLines.push(lines[r]);
-          r++;
+          r += 1;
           continue;
         }
         break;
@@ -2954,12 +2983,12 @@ function parseParagraph(lines, i, end, refs, inner, inList) {
       if (startsInterruptBlock(b, inList)) break;
     }
     paraLines.push(lines[r]);
-    r++;
+    r += 1;
   }
   return { block: { t: 'para', text: joinParaLines(paraLines) }, next: r };
 }
 
-// True when the line starts a block that interrupts a paragraph.
+// Does this line start a block that interrupts a paragraph?
 function startsInterruptBlock(b, inList) {
   if (matchATX(b)) return true;
   if (matchFencedStart(b)) return true;
@@ -2967,126 +2996,130 @@ function startsInterruptBlock(b, inList) {
   if (htmlBlockType(b, true) > 0) return true;
   if (stripQuoteText(b) !== null) return true;
   const marker = matchListStart(b);
-  if (marker && listInterruptsPara(marker, b, inList)) return true;
-  return false;
+  return marker !== null && listInterruptsPara(marker, b, inList);
 }
 
+// The text after a blockquote marker on this line body, or null when
+// the line does not start with one.
 function stripQuoteText(b) {
-  let p = 0;
-  while (p < b.length && b[p] === ' ' && p < 3) p++;
-  return b[p] === '>' ? b.slice(p + 1) : null;
+  const indent = leadingSpacesUpTo3(b);
+  return b[indent] === '>' ? b.slice(indent + 1) : null;
 }
 
-/* ---------------- rendering ---------------- */
+/* ============ rendering the block tree ============ */
 
 function renderBlocks(blocks, refs, tight) {
-  let out = '';
-  for (const b of blocks) {
-    switch (b.t) {
+  let html = '';
+  for (const block of blocks) {
+    switch (block.t) {
       case 'para': {
-        const html = renderParaText(b.text, refs);
-        out += tight ? html : '<p>' + html + '</p>\n';
+        const inner = renderParaText(block.text, refs);
+        html += tight ? inner : '<p>' + inner + '</p>\n';
         break;
       }
       case 'head':
-        out += '<h' + b.level + '>' + parseInline(b.text, refs) + '</h' + b.level + '>\n';
+        html += '<h' + block.level + '>' + parseInline(block.text, refs) + '</h' + block.level + '>\n';
         break;
       case 'code': {
-        // code text renders with exactly one trailing '\n' (none when empty)
-        let ct = b.text;
-        if (ct !== '') {
-          if (ct.charCodeAt(ct.length - 1) === 10) ct = ct.slice(0, -1);
-          ct += '\n';
+        // Code text renders with exactly one trailing newline (and
+        // none at all when the block is empty).
+        let codeText = block.text;
+        if (codeText !== '') {
+          if (codeText.charCodeAt(codeText.length - 1) === 10) codeText = codeText.slice(0, -1);
+          codeText += '\n';
         }
-        out += b.lang !== null
-          ? '<pre><code class="language-' + escText(b.lang) + '">' + escFull(ct) + '</code></pre>\n'
-          : '<pre><code>' + escFull(ct) + '</code></pre>\n';
+        html += block.lang !== null
+          ? '<pre><code class="language-' + escText(block.lang) + '">' + escFull(codeText) + '</code></pre>\n'
+          : '<pre><code>' + escFull(codeText) + '</code></pre>\n';
         break;
       }
       case 'html':
-        out += b.text;
+        html += block.text;
         break;
       case 'hr':
-        out += '<hr>\n';
+        html += '<hr>\n';
         break;
       case 'quote':
-        out += '<blockquote>\n' + renderBlocks(b.children, refs, false) + '</blockquote>\n';
+        html += '<blockquote>\n' + renderBlocks(block.children, refs, false) + '</blockquote>\n';
         break;
       case 'list': {
-        const tag = b.ordered ? 'ol' : 'ul';
-        const startAttr = b.ordered && b.start !== 1 ? ' start="' + b.start + '"' : '';
-        out += '<' + tag + startAttr + '>\n';
-        for (const item of b.items) out += renderListItem(item, refs, b.tight);
-        out += '</' + tag + '>\n';
+        const tag = block.ordered ? 'ol' : 'ul';
+        const startAttr = block.ordered && block.start !== 1 ? ' start="' + block.start + '"' : '';
+        html += '<' + tag + startAttr + '>\n';
+        for (const item of block.items) html += renderListItem(item, refs, block.tight);
+        html += '</' + tag + '>\n';
         break;
       }
       case 'table': {
-        out += '<table>\n<thead>\n<tr>\n';
-        for (let col = 0; col < b.head.length; col++) {
-          const alignAttr = b.align[col] ? ' align="' + b.align[col] + '"' : '';
-          out += '<th' + alignAttr + '>' + parseInline(b.head[col], refs) + '</th>\n';
+        html += '<table>\n<thead>\n<tr>\n';
+        for (let col = 0; col < block.head.length; col++) {
+          const alignAttr = block.align[col] ? ' align="' + block.align[col] + '"' : '';
+          html += '<th' + alignAttr + '>' + parseInline(block.head[col], refs) + '</th>\n';
         }
-        out += '</tr>\n</thead>\n';
-        if (b.rows.length > 0) {
-          out += '<tbody>';
-          for (const row of b.rows) {
-            out += '<tr>\n';
-            for (let col = 0; col < b.head.length; col++) {
+        html += '</tr>\n</thead>\n';
+        if (block.rows.length > 0) {
+          html += '<tbody>';
+          for (const row of block.rows) {
+            html += '<tr>\n';
+            for (let col = 0; col < block.head.length; col++) {
               const cell = row[col] !== undefined ? row[col] : '';
-              const alignAttr = b.align[col] ? ' align="' + b.align[col] + '"' : '';
-              out += '<td' + alignAttr + '>' + parseInline(cell, refs) + '</td>\n';
+              const alignAttr = block.align[col] ? ' align="' + block.align[col] + '"' : '';
+              html += '<td' + alignAttr + '>' + parseInline(cell, refs) + '</td>\n';
             }
-            out += '</tr>\n';
+            html += '</tr>\n';
           }
-          out += '</tbody></table>\n';
+          html += '</tbody></table>\n';
         } else {
-          out += '</table>\n';
+          html += '</table>\n';
         }
         break;
       }
     }
   }
-  return out;
+  return html;
 }
 
-// A paragraph inside a tight list item renders as bare inline text (+ \n);
-// elsewhere it is wrapped in <p>...</p>. Task-list checkboxes are detected
-// on the item's first paragraph here.
+// Render a paragraph's text. (A paragraph inside a tight list item is
+// emitted as bare inline output by the caller; everywhere else it is
+// wrapped in <p>...</p>.)
 function renderParaText(text, refs) {
   return parseInline(text, refs);
 }
 
 function renderListItem(item, refs, tight) {
-  let out = '<li>';
+  let html = '<li>';
+  // A task-list checkbox is recognised on the item's first paragraph.
   if (item.length > 0 && item[0].t === 'para') {
     const check = /^\[( |x|X)\]([ \t]|$)/.exec(item[0].text);
     if (check) {
-      const isChecked = check[1] === 'x' || check[1] === 'X';
-      const afterCheck = item[0].text.slice(3);
-      const box = isChecked
+      const box = (check[1] === 'x' || check[1] === 'X')
         ? '<input checked="" disabled="" type="checkbox">'
         : '<input disabled="" type="checkbox">';
-      if (tight) out += box + parseInline(afterCheck, refs);
-      else out += '<p>' + box + parseInline(afterCheck, refs) + '</p>\n';
-      out += renderBlocks(item.slice(1), refs, tight);
-      out += '</li>\n';
-      return out;
+      const rest = item[0].text.slice(3);
+      html += tight
+        ? box + parseInline(rest, refs)
+        : '<p>' + box + parseInline(rest, refs) + '</p>\n';
+      html += renderBlocks(item.slice(1), refs, tight);
+      html += '</li>\n';
+      return html;
     }
   }
-  out += renderBlocks(item, refs, tight);
-  out += '</li>\n';
-  return out;
+  html += renderBlocks(item, refs, tight);
+  html += '</li>\n';
+  return html;
 }
 
-/* ---------------- entry point ---------------- */
+/* ============ entry point ============ */
 
+// Render one Markdown document to the HTML marked 18.1.3 (default
+// options) produces for it. Each call is independent: the document-wide
+// inline state starts fresh, and nothing is carried between calls.
 export function parse(markdown) {
-  // document-level inline state starts fresh for every document
   inLink = false;
   inRawBlock = false;
   const src = String(markdown).replace(/\r\n?/g, '\n');
-  const docLines = splitLines(src);
+  const lines = splitLines(src);
   const refs = new Map();
-  const { blocks } = parseBlocks(docLines, 0, docLines.length, refs, false);
+  const { blocks } = parseBlocks(lines, 0, lines.length, refs, false);
   return renderBlocks(blocks, refs, false);
 }
