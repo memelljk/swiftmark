@@ -58,52 +58,71 @@ function cleanUrl(href) {
   }
 }
 
-// Link label normalisation: fold line endings / runs of whitespace to one
-// space, trim, Unicode case-fold (including ß -> ss and ligatures).
+// Normalising a link label: collapse every whitespace run to a single
+// space, trim the ends, fold case, and expand the few ligatures / sharp-s
+// forms that Unicode case folding maps to plain ASCII letters.
+const LABEL_EXPANSIONS = [
+  ['ß', 'ss'], ['ﬀ', 'ff'], ['ﬁ', 'fi'], ['ﬂ', 'fl'],
+  ['ﬃ', 'ffi'], ['ﬄ', 'ffl'], ['ﬅ', 'st'],
+];
 function normLabel(s) {
-  return s.replace(/[\s]+/g, ' ').trim().toLowerCase()
-    .replace(/ß/g, 'ss').replace(/ﬀ/g, 'ff').replace(/ﬁ/g, 'fi').replace(/ﬂ/g, 'fl')
-    .replace(/ﬃ/g, 'ffi').replace(/ﬄ/g, 'ffl').replace(/ﬅ/g, 'st');
+  let out = s.replace(/[\s]+/g, ' ').trim().toLowerCase();
+  for (const [from, to] of LABEL_EXPANSIONS) out = out.split(from).join(to);
+  return out;
 }
 
 function isAsciiPunct(c) {
   return (c >= 33 && c <= 47) || (c >= 58 && c <= 64) || (c >= 91 && c <= 96) || (c >= 123 && c <= 126);
 }
-// Fast char-code tests (hot in parseInline — a regex per character is
-// measurably slower): email local-part chars [A-Za-z0-9._+-] and
-// alphanumerics [A-Za-z0-9].
+// Single-character class tests by code point. parseInline sits on these in
+// its hottest loops, so they are plain comparisons — no regex per char.
+// Email local part: letters, digits, '.', '_', '+', '-'.
 function isEmailLocalCode(c) {
-  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 46 || c === 95 || c === 43 || c === 45;
-}
-function isAlnumCode(c) {
+  if (c === 46 || c === 95 || c === 43 || c === 45) return true;
   return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
 }
+function isAlnumCode(c) {
+  if (c >= 97) return c <= 122;
+  if (c >= 65) return c <= 90;
+  return c >= 48 && c <= 57;
+}
 function isLetterCode(c) { // [A-Za-z]
-  return (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+  if (c >= 97) return c <= 122;
+  return c >= 65 && c <= 90;
 }
 function isTagNameCode(c) { // [A-Za-z0-9-]
-  return isAlnumCode(c) || c === 45;
+  if (c === 45) return true;
+  return isAlnumCode(c);
 }
 function isAttrNameCode(c) { // [\w.:-] = [A-Za-z0-9_.:-]
-  return isAlnumCode(c) || c === 95 || c === 46 || c === 58 || c === 45;
+  if (c === 95 || c === 46 || c === 58 || c === 45) return true;
+  return isAlnumCode(c);
 }
 function isUnquotedAttrCode(c) { // not [ \t\n"'=<>\`]
-  return c !== 32 && c !== 9 && c !== 10 && c !== 34 && c !== 39 && c !== 61 && c !== 60 && c !== 62 && c !== 96;
+  switch (c) {
+    case 32: case 9: case 10: case 34: case 39:
+    case 61: case 60: case 62: case 96:
+      return false;
+    default:
+      return true;
+  }
 }
-// Chars that always need per-character handling in parseInline.
+// Characters that always need per-character handling inside parseInline.
 const INLINE_SPECIAL = new Uint8Array(128);
-for (const c of [92, 96, 60, 38, 42, 95, 126, 91, 93, 33, 10]) INLINE_SPECIAL[c] = 1; // \ ` < & * _ ~ [ ] ! \n
-// Letters that can start an extended autolink (www. / scheme / mailto: / xmpp:).
+for (const code of [10, 33, 38, 42, 60, 91, 92, 93, 95, 96, 126]) INLINE_SPECIAL[code] = 1; // \n ! & * < [ \ ] _ ` ~
+// Letters that can begin an extended autolink: www. / scheme / mailto: / xmpp:.
+const TRIGGER_LETTER = new Uint8Array(128);
+for (const code of [72, 70, 102, 104, 109, 119, 120]) TRIGGER_LETTER[code] = 1; // H F f h m w x
 function isTriggerLetterCode(c) {
-  return c === 119 || c === 104 || c === 72 || c === 102 || c === 70 || c === 109 || c === 120; // w h H f F m x
+  return c < 128 && TRIGGER_LETTER[c] === 1;
 }
 function isSpaceOrTab(c) { return c === ' ' || c === '\t'; }
 function isUnicodePunct(ch) {
-  // CommonMark punctuation = ASCII punctuation + Unicode P/S categories.
-  // For ASCII (the overwhelmingly common case) the code check alone
-  // decides — skip the Unicode regex entirely.
-  const c = ch.charCodeAt(0);
-  if (c < 128) return isAsciiPunct(c);
+  // CommonMark punctuation is ASCII punctuation plus the Unicode P and S
+  // categories. ASCII input (nearly everything) is decided by the cheap
+  // code check alone; the Unicode regex only runs for non-ASCII chars.
+  const code = ch.charCodeAt(0);
+  if (code < 128) return isAsciiPunct(code);
   return /[\p{P}\p{S}]/u.test(ch);
 }
 function isWhitespace(ch) {
