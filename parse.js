@@ -437,11 +437,11 @@ function parseInline(text, refs) {
 
     // --- '[' / '![' link openers ---
     if (ch === '[' || (ch === '!' && text[i + 1] === '[')) {
-      const image = ch === '!';
+      const isImage = ch === '!';
       flush();
-      const d = { k: 'd', s: image ? '![' : '[', ch: '[', n: 1, open: false, close: false, active: true, link: true, image, pos: image ? i + 1 : i };
-      nodes.push(d); delims.push(d);
-      i += image ? 2 : 1;
+      const opener = { k: 'd', s: isImage ? '![' : '[', ch: '[', n: 1, open: false, close: false, active: true, link: true, image: isImage, pos: isImage ? i + 1 : i };
+      nodes.push(opener); delims.push(opener);
+      i += isImage ? 2 : 1;
       continue;
     }
 
@@ -450,21 +450,20 @@ function parseInline(text, refs) {
       flush();
       const made = tryCloseBracket(text, i, nodes, delims, refs);
       if (made) { i = made.next; continue; }
-      // No link formed: when the '[label](dest)' still matches marked's
-      // blockSkip `link` pattern (label valid per the Ot-masked grammar,
-      // balanced-paren destination), the label's delimiters are invisible
-      // to the outer emphasis scan — mask them so processEmphasis never
-      // pairs them. (A label whose code span holds a backtick fails
-      // validLabel, so the link does not form, yet the mask still hides
-      // the label: doc-16/doc-20 `[at _node `` a ` b ``_](...)`.)
+      // No link formed: when '[label](dest)' still matches marked's
+      // blockSkip `link` pattern (label valid under the Ot-masked
+      // grammar, balanced-paren destination), the label's delimiters
+      // are invisible to the outer emphasis scan — mask them so
+      // processEmphasis never pairs them. (A label whose code span
+      // holds a backtick fails validLabel, so the link does not form,
+      // yet the mask still hides the label: doc-16/doc-20
+      // `[at _node `` a ` b ``_](...)`.)
       if (text[i + 1] === '(' && blockSkipDestEnd(text, i + 1) >= 0) {
         for (let d = delims.length - 1; d >= 0; d--) {
-          if (!delims[d].link || !delims[d].active) continue;
-          const opener = delims[d];
-          const rawLabel = text.slice(opener.pos + 1, i);
-          if (!blockSkipLabelOk(rawLabel)) break;
-          const oiStack = delims.indexOf(opener);
-          for (let m = oiStack + 1; m < delims.length; m++) {
+          const cand = delims[d];
+          if (!cand.link || !cand.active) continue;
+          if (!blockSkipLabelOk(text.slice(cand.pos + 1, i))) break;
+          for (let m = d + 1; m < delims.length; m++) {
             if (!delims[m].link) delims[m].masked = true;
           }
           break;
@@ -474,18 +473,18 @@ function parseInline(text, refs) {
       // opener stays active so an outer image can still form at a later
       // ']' — cm-520; a dead link opener must not keep suppressing the
       // extended autolinks after it, doc-32)
-      for (let d = delims.length - 1; d >= 0; d--) {
-        if (delims[d].link && !delims[d].image && delims[d].active) { delims[d].active = false; break; }
+      for (let k = delims.length - 1; k >= 0; k--) {
+        if (delims[k].link && !delims[k].image && delims[k].active) { delims[k].active = false; break; }
       }
       buf += ']'; i++; continue;
     }
 
     // --- line ending: soft break, or hard break after 2+ spaces ---
     if (ch === '\n') {
-      let spaces = 0;
-      for (let k = buf.length - 1; k >= 0 && buf[k] === ' '; k--) spaces++;
-      if (spaces >= 2) {
-        buf = buf.slice(0, buf.length - spaces);
+      let trailing = 0;
+      for (let k = buf.length - 1; k >= 0 && buf[k] === ' '; k--) trailing++;
+      if (trailing >= 2) {
+        buf = buf.slice(0, buf.length - trailing);
         flush(); nodes.push(BR); i++;
         while (i < n && (text[i] === ' ' || text[i] === '\t')) i++;
       } else {
@@ -495,68 +494,67 @@ function parseInline(text, refs) {
     }
 
     // --- extended autolinks (GFM): www. / scheme:// / email / mailto: / xmpp: ---
-    // forward matching from the word start, so a '_' inside an email
-    // local part never becomes an emphasis delimiter first (gfm-632).
-    // Extended autolinks do not form inside link text, but that is decided
-    // when the link forms (unlinkExtAutolinks turns them back into plain
-    // text), NOT by scanning the openers here: an UNRESOLVED '[' must not
-    // suppress autolinks after it (marked only suppresses them inside a
-    // resolved link's text). A raw <a> tag does suppress them (inLink).
-    // www. needs a word start: whitespace, '(', '*', '_', '~', or the end
-    // of a previous token (an HTML tag, code span, link, ... — after such
-    // a token, marked's url tokenizer is tried at the fresh position).
+    // Matching runs forward from the word start, so a '_' inside an
+    // email local part never becomes an emphasis delimiter first
+    // (gfm-632). Extended autolinks do not form inside link text, but
+    // that is decided when the link forms (unlinkExtAutolinks turns
+    // them back into plain text), NOT by scanning the openers here: an
+    // UNRESOLVED '[' must not suppress autolinks after it (marked only
+    // suppresses them inside a resolved link's text). A raw <a> tag
+    // does suppress them (inLink). www. needs a word start: whitespace,
+    // '(', '*', '_', '~', or the end of a previous token (an HTML tag,
+    // code span, link, ... — after such a token, marked's url tokenizer
+    // is tried at the fresh position).
     if (ch === 'w' && !inLink && text.startsWith('www.', i)) {
       const prev = i === 0 ? '' : text[i - 1];
-      // a delimiter node (k:'d') is not a token: after '[' the www. must
-      // still be rejected (prev is '['), only real tokens count
+      // a delimiter node (k:'d') is not a token: after '[' the www.
+      // must still be rejected (prev is '['); only real tokens count
       const lastNd = nodes.length > 0 ? nodes[nodes.length - 1] : null;
-      const atTokenBoundary = buf === '' && lastNd !== null && typeof lastNd !== 'string' && lastNd.k !== 'd';
-      if (prev === '' || isWhitespace(prev) || prev === '(' || prev === '*' || prev === '_' || prev === '~' || atTokenBoundary) {
-        const m = matchExtendedAutolink(text, i, 'www', delims);
-        if (m) { flush(); nodes.push(m.node); i = m.next; continue; }
+      const afterToken = buf === '' && lastNd !== null && typeof lastNd !== 'string' && lastNd.k !== 'd';
+      if (prev === '' || isWhitespace(prev) || prev === '(' || prev === '*' || prev === '_' || prev === '~' || afterToken) {
+        const hit = matchExtendedAutolink(text, i, 'www', delims);
+        if (hit) { flush(); nodes.push(hit.node); i = hit.next; continue; }
       }
     }
     if ((ch === 'h' || ch === 'H' || ch === 'f' || ch === 'F') && !inLink) {
-      const m = matchExtendedAutolink(text, i, 'scheme', delims);
-      if (m) { flush(); nodes.push(m.node); i = m.next; continue; }
+      const hit = matchExtendedAutolink(text, i, 'scheme', delims);
+      if (hit) { flush(); nodes.push(hit.node); i = hit.next; continue; }
     }
     // mailto:/xmpp: (lowercase only) at the start or after a non-alphanumeric
     if ((ch === 'm' || ch === 'x') && !inLink && (text.startsWith('mailto:', i) || text.startsWith('xmpp:', i))) {
       const prev = i === 0 ? '' : text[i - 1];
       if (prev === '' || !isAlnumCode(prev.charCodeAt(0))) {
-        const m = matchEmailAt(text, i, delims);
-        if (m) { flush(); nodes.push(m.node); i = m.next; continue; }
+        const hit = matchEmailAt(text, i, delims);
+        if (hit) { flush(); nodes.push(hit.node); i = hit.next; continue; }
       }
     }
     // plain email: current char is a local char and the previous one is not
     if (!inLink && isEmailLocalCode(ch.charCodeAt(0))) {
       const prev = i === 0 ? '' : text[i - 1];
       if (prev === '' || !isAlnumCode(prev.charCodeAt(0))) {
-        const m = matchEmailAt(text, i, delims);
-        if (m) { flush(); nodes.push(m.node); i = m.next; continue; }
+        const hit = matchEmailAt(text, i, delims);
+        if (hit) { flush(); nodes.push(hit.node); i = hit.next; continue; }
       }
     }
 
     buf += ch; i++;
   }
   flush();
-  // Delimiters inside a blockSkip-masked range are invisible to the outer
+  // Delimiters inside a blockSkip-masked span are invisible to the outer
   // emphasis scan (marked's emStrong mask): the Ot mask pairs a backtick
   // run with a later same-length run and neutralises the backticks
   // between them, then blockSkip swallows the whole span — so a stray
   // backtick in a link label can hide emphasis far past the link
-  // (doc-09/doc-28/doc-35). Delimiters consumed by a link that formed
-  // are already gone from the stack, so only unformed labels and stray
+  // (doc-09/doc-28/doc-35). Delimiters eaten by a link that formed are
+  // already gone from the stack, so only unformed labels and stray
   // spans are hit here.
   if (delims.length > 0) {
-    const ranges = blockSkipRanges(text);
-    if (ranges.length > 0) {
-      let ri = 0;
-      for (const d of delims) {
-        if (d.link || d.masked) continue;
-        while (ri < ranges.length && ranges[ri][1] <= d.pos) ri++;
-        if (ri < ranges.length && d.pos >= ranges[ri][0] && d.pos < ranges[ri][1]) d.masked = true;
-      }
+    const spans = blockSkipRanges(text);
+    let si = 0;
+    for (const delim of delims) {
+      if (delim.link || delim.masked) continue;
+      while (si < spans.length && spans[si][1] <= delim.pos) si++;
+      if (si < spans.length && delim.pos >= spans[si][0] && delim.pos < spans[si][1]) delim.masked = true;
     }
   }
   processEmphasis(nodes, delims, 0, text);
@@ -586,8 +584,10 @@ function renderNodes(nodes) {
         out += '>';
         break;
       }
-      case 8: out += nd.s; break; // pre-escaped text (autolink text)
-      case 9: out += nd.s; break; // raw-block text (verbatim, unescaped)
+      case 8: // pre-escaped text (autolink text)
+      case 9: // raw-block text, emitted verbatim
+        out += nd.s;
+        break;
       case 'd': out += escText(nd.s); break;
     }
   }
@@ -596,37 +596,46 @@ function renderNodes(nodes) {
 
 // Strip tags (used for image alt text): render children, drop <...>.
 function stripTags(html) {
-  return html.replace(/<[^>]*>/g, '');
+  let out = '';
+  let i = 0;
+  while (i < html.length) {
+    const lt = html.indexOf('<', i);
+    if (lt < 0) { out += html.slice(i); break; }
+    out += html.slice(i, lt);
+    const gt = html.indexOf('>', lt + 1);
+    if (gt < 0) { out += html.slice(lt); break; }
+    i = gt + 1;
+  }
+  return out;
 }
 
 /* ---------------- emphasis (delimiter stack) ---------------- */
 
-// Marked's emStrong forward scan, over the delimiter stack: starting
-// from opener O, walk the same-char runs after it the way marked's
-// RDelim regexes classify them and report where the scan stops.
-// Counts use original run lengths (on): in marked's left-to-right
-// order the scan runs before any pair inside O's range forms, so
-// intermediate runs count at full length even when our closer-first
-// loop already folded them into an inner pair.
-// Returns { stop, m, f, b }: stop = stack index where the running
-// total m reached <= 0 (-1 when the scan runs out), m = the total
-// after subtracting the stop run, f = total length of runs the rule
-// of three skipped as mid delimiters, b = original length of the
-// stop run. Marked sizes the closer it consumes as
-// min(b, b + m + f), so m and f matter to whoever forms the pair.
+// Marked's emStrong forward scan, walking the delimiter stack from
+// opener O the way marked's RDelim patterns classify the runs after it,
+// and reporting where the scan stops. Totals use original run lengths
+// (on): in marked's left-to-right order the scan runs before any pair
+// inside O's range forms, so runs in between count at full length even
+// when our closer-first loop already folded them into an inner pair.
+// Returns { stop, m, f, b }: stop = stack index where the running total
+// m reached <= 0 (-1 when the scan runs out), m = the total after
+// subtracting the stop run, f = total length of runs the rule of three
+// passed over as mid delimiters, b = original length of the stop run.
+// Marked sizes the closer it consumes as min(b, b + m + f), so m and f
+// matter to whoever forms the pair.
 function markedScan(delims, oi, text) {
-  const opener = delims[oi];
-  const ch = opener.ch;
-  let m = opener.n, f = 0;
-  const y = opener.on;
-  // R flag (marked emStrong): the opener can open and the char before
-  // it is non-whitespace — then a pure closer is also run through the
-  // rule of three instead of always closing
-  const p = opener.pos > 0 ? text[opener.pos - 1] : '';
-  const after = opener.pos + opener.on < text.length ? text[opener.pos + opener.on] : '';
-  const d = after !== '' && isUnicodePunct(after);
-  const h = p === '*' || p === '_' || (p !== '' && isUnicodePunct(p));
-  const R = p !== '' && !isWhitespace(p) && (d || (ch === '*' && !h));
+  const op = delims[oi];
+  const ch = op.ch;
+  let total = op.n, skipped = 0;
+  const openLen = op.on;
+  // R flag (marked emStrong): the opener can open and the char before it
+  // is non-whitespace — then a pure closer is also run through the rule
+  // of three instead of always closing
+  const beforeCh = op.pos > 0 ? text[op.pos - 1] : '';
+  const afterCh = op.pos + op.on < text.length ? text[op.pos + op.on] : '';
+  const afterIsPunct = afterCh !== '' && isUnicodePunct(afterCh);
+  const beforeIsDelim = beforeCh === '*' || beforeCh === '_' || (beforeCh !== '' && isUnicodePunct(beforeCh));
+  const useRuleOfThree = beforeCh !== '' && !isWhitespace(beforeCh) && (afterIsPunct || (ch === '*' && !beforeIsDelim));
   for (let k = oi + 1; k < delims.length; k++) {
     const run = delims[k];
     if (run.ch !== ch || run.link || run.masked) continue;
@@ -636,26 +645,28 @@ function markedScan(delims, oi, text) {
     if (run.inPairCh !== undefined && run.inPairCh !== ch) continue;
     if (!run.open && !run.close) continue; // neither-flanking: invisible
     const b = run.on;
-    if (run.open && !run.close) { m += b; continue; } // pure opener
-    if ((run.open && run.close) || R) {
+    if (run.open && !run.close) { total += b; continue; } // pure opener
+    if ((run.open && run.close) || useRuleOfThree) {
       // both-flanking (or R): rule of three decides opener vs closer
-      if (y % 3 !== 0 && (y + b) % 3 === 0) { f += b; continue; }
+      if (openLen % 3 !== 0 && (openLen + b) % 3 === 0) { skipped += b; continue; }
     }
-    m -= b;
-    if (m > 0) continue;
-    return { stop: k, m, f, b };
+    total -= b;
+    if (total > 0) continue;
+    return { stop: k, m: total, f: skipped, b };
   }
-  return { stop: -1, m, f, b: 0 }; // scan ran out: no pair
+  return { stop: -1, m: total, f: skipped, b: 0 }; // scan ran out: no pair
 }
 
 // Stack index where marked's scan from opener oi stops, or -1.
 function markedScanStopIndex(delims, oi, text) {
-  return markedScan(delims, oi, text).stop;
+  const scan = markedScan(delims, oi, text);
+  return scan.stop;
 }
 
 // True when marked's forward scan from opener oi stops exactly at ci.
 function markedScanPairs(delims, oi, ci, text) {
-  return markedScanStopIndex(delims, oi, text) === ci;
+  const stopAt = markedScanStopIndex(delims, oi, text);
+  return stopAt === ci;
 }
 
 // True when some fresh opener before stack index oi (but at or after
@@ -663,79 +674,76 @@ function markedScanPairs(delims, oi, ci, text) {
 // same char, still able to open at full original length, itself
 // eligible against this closer under the rule of three, and its
 // forward scan stops exactly at ci. One exception: when the claim
-// would consume MORE closer chars than the pair spends on its tags
+// would spend MORE closer chars than the pair uses on its tags
 // (min(on, on + m + f) > use), the surplus lands inside the pair and
 // can itself close an inner opener — marked pairs `*foo *bar**` as
 // nested ems that way — so the inner candidate must not stand down.
 function earlierOpenerClaims(delims, oi, ci, fromStack, text) {
-  const closer = delims[ci];
-  if (closer.n !== closer.on) return false;
+  const closeRun = delims[ci];
+  if (closeRun.n !== closeRun.on) return false;
   for (let j = oi - 1; j >= fromStack; j--) {
-    const e = delims[j];
-    if (!e.active || e.masked || e.ch !== closer.ch || !e.open) continue;
-    if (e.n !== e.on) continue; // only a fresh, untouched opener claims
-    if ((e.close || closer.open) && ((e.n + closer.n) % 3 === 0) && !(e.n % 3 === 0 && closer.n % 3 === 0)) continue;
+    const cand = delims[j];
+    if (!cand.active || cand.masked || cand.ch !== closeRun.ch || !cand.open) continue;
+    if (cand.n !== cand.on) continue; // only a fresh, untouched opener claims
+    if ((cand.close || closeRun.open) && ((cand.n + closeRun.n) % 3 === 0) && !(cand.n % 3 === 0 && closeRun.n % 3 === 0)) continue;
     const scan = markedScan(delims, j, text);
     if (scan.stop !== ci) continue;
-    const bUsed = Math.min(closer.on, closer.on + scan.m + scan.f);
-    const claimUse = (e.n >= 2 && closer.n >= 2) ? 2 : 1;
-    if (bUsed <= claimUse) return true;
+    const spent = Math.min(closeRun.on, closeRun.on + scan.m + scan.f);
+    const pairUse = (cand.n >= 2 && closeRun.n >= 2) ? 2 : 1;
+    if (spent <= pairUse) return true;
   }
   return false;
 }
 
-// Process emphasis/strikethrough closers left to right, oldest first.
-// fromStack: only delimiters at or after this stack index may open/close.
+// Walk the closers left to right, oldest first, pairing each with the
+// nearest earlier opener that can open. fromStack: only delimiters at or
+// after this stack index may open or close.
 function processEmphasis(nodes, delims, fromStack, text) {
   let ci = fromStack;
   while (ci < delims.length) {
-    const closer = delims[ci];
-    if (!closer.active || closer.masked || closer.ch === '[' || !closer.close) { ci++; continue; }
+    const closeRun = delims[ci];
+    if (!closeRun.active || closeRun.masked || closeRun.ch === '[' || !closeRun.close) { ci++; continue; }
     // nearest preceding opener of the same char that can open
-    let oi = ci - 1, opener = null;
-    while (oi >= fromStack) {
-      const d = delims[oi];
-      if (d.masked) { oi--; continue; }
-      if (d.ch === closer.ch && d.open && d.active) {
-        // strikethrough openers and closers must have EQUAL lengths
-        if (closer.ch === '~' && d.n !== closer.n) { oi--; continue; }
-        // rule of three: skip unless both counts are multiples of 3
-        if ((d.close || closer.open) && ((d.n + closer.n) % 3 === 0) && !(d.n % 3 === 0 && closer.n % 3 === 0)) {
-          oi--; continue;
-        }
-        // marked's emStrong scan, single-char openers only: a lone `*`
-        // or `_` opener pairs with this closer only when marked's
-        // forward scan stops here. (Multi-char openers are left on the
-        // old logic: a failed full-length scan is retried by marked as
-        // a shorter run, so the scan must not reject them — that retry
-        // is what forms cm-408/413/442/444/445.)
-        if (closer.ch !== '~' && d.n === 1 && d.on === 1 && !markedScanPairs(delims, oi, ci, text)) { oi--; continue; }
-        // Don't let a single-char closer steal chars from a TWO-char
-        // opener when that opener pairs with a later multi-char closer
-        // at full length: the strong forms first in marked, and the
-        // single closer is then literal inside it (doc-01/11/26).
-        // (An opener with 3+ chars can spare one: the single closer
-        // pairs first and the leftover still forms the strong — cm-430
-        // `***foo* bar**` — so the block is only for n === 2.)
-        if (closer.ch !== '~' && closer.n === 1 && d.n === 2) {
-          const stop = markedScanStopIndex(delims, oi, text);
-          if (stop > ci && delims[stop].n >= 2) { oi--; continue; }
-        }
-        // Opener priority, marked style: marked's tokenizer works
-        // opener-first, so when an EARLIER fresh opener's forward
-        // scan stops exactly at this closer, that opener claims the
-        // closer and this candidate must stand down — even when this
-        // candidate's own scan would also stop here. Without this, a
-        // lone inner `*` steals the closing `**` of a strong that
-        // marked forms around it (`**a *b **c**d* e**` keeps its
-        // inner `*`s literal and closes with the final `**`).
-        if (closer.ch !== '~' && earlierOpenerClaims(delims, oi, ci, fromStack, text)) { oi--; continue; }
-        opener = d; break;
+    let oi = -1, opener = null;
+    for (let j = ci - 1; j >= fromStack; j--) {
+      const cand = delims[j];
+      if (cand.masked) continue;
+      if (cand.ch !== closeRun.ch || !cand.open || !cand.active) continue;
+      // strikethrough openers and closers must have EQUAL lengths
+      if (closeRun.ch === '~' && cand.n !== closeRun.n) continue;
+      // rule of three: skip unless both counts are multiples of 3
+      if ((cand.close || closeRun.open) && ((cand.n + closeRun.n) % 3 === 0) && !(cand.n % 3 === 0 && closeRun.n % 3 === 0)) continue;
+      // marked's emStrong scan, single-char openers only: a lone `*`
+      // or `_` opener pairs with this closer only when marked's
+      // forward scan stops here. (Multi-char openers stay on the
+      // older logic: a failed full-length scan is retried by marked
+      // as a shorter run, so the scan must not reject them — that
+      // retry is what forms cm-408/413/442/444/445.)
+      if (closeRun.ch !== '~' && cand.n === 1 && cand.on === 1 && !markedScanPairs(delims, j, ci, text)) continue;
+      // Don't let a single-char closer steal chars from a TWO-char
+      // opener when that opener pairs with a later multi-char closer
+      // at full length: the strong forms first in marked, and the
+      // single closer is then literal inside it (doc-01/11/26).
+      // (An opener with 3+ chars can spare one: the single closer
+      // pairs first and the leftover still forms the strong — cm-430
+      // `***foo* bar**` — so the block is only for n === 2.)
+      if (closeRun.ch !== '~' && closeRun.n === 1 && cand.n === 2) {
+        const stop = markedScanStopIndex(delims, j, text);
+        if (stop > ci && delims[stop].n >= 2) continue;
       }
-      oi--;
+      // Opener priority, marked style: marked's tokenizer works
+      // opener-first, so when an EARLIER fresh opener's forward scan
+      // stops exactly at this closer, that opener claims the closer
+      // and this candidate must stand down — even when this
+      // candidate's own scan would also stop here. Without this, a
+      // lone inner `*` steals the closing `**` of a strong that
+      // marked forms around it (`**a *b **c**d* e**` keeps its
+      // inner `*`s literal and closes with the final `**`).
+      if (closeRun.ch !== '~' && earlierOpenerClaims(delims, j, ci, fromStack, text)) continue;
+      oi = j; opener = cand; break;
     }
     if (!opener) { ci++; continue; }
-    const use = (opener.n >= 2 && closer.n >= 2) ? 2 : 1;
+    const take = (opener.n >= 2 && closeRun.n >= 2) ? 2 : 1;
     // Marked closer accounting: when marked's forward scan from this
     // opener stops at this closer, the closer chars it consumes are
     // min(on, on + m + f) — runs the rule of three skipped as mids
@@ -747,61 +755,61 @@ function processEmphasis(nodes, delims, fromStack, text) {
     // stays inside the strong. Apply only when both runs are still
     // untouched and the opener spends its whole run on the pair, so
     // the surplus can only land inside, never before the opener.
-    let consume = use, insideTail = '';
-    if (closer.ch !== '~' && opener.n === opener.on && closer.n === closer.on && opener.on === use) {
+    let eat = take, tailText = '';
+    if (closeRun.ch !== '~' && opener.n === opener.on && closeRun.n === closeRun.on && opener.on === take) {
       // The scan can only enlarge the closer's contribution when a
       // rule-of-three mid skip is possible between the pair: a
       // both-flanking run of the same char in between, or the R flag
       // (which runs even pure closers through the rule of three).
       // Skip the scan entirely when neither can occur.
-      let midPossible = false;
-      const pBefore = opener.pos > 0 ? text[opener.pos - 1] : '';
-      const afterOpen = opener.pos + opener.on < text.length ? text[opener.pos + opener.on] : '';
-      if (pBefore !== '' && !isWhitespace(pBefore) &&
-          ((afterOpen !== '' && isUnicodePunct(afterOpen)) ||
-           (closer.ch === '*' && pBefore !== '*' && pBefore !== '_' && !isUnicodePunct(pBefore)))) {
-        midPossible = true;
+      let midExists = false;
+      const charBefore = opener.pos > 0 ? text[opener.pos - 1] : '';
+      const charAfter = opener.pos + opener.on < text.length ? text[opener.pos + opener.on] : '';
+      if (charBefore !== '' && !isWhitespace(charBefore) &&
+          ((charAfter !== '' && isUnicodePunct(charAfter)) ||
+           (closeRun.ch === '*' && charBefore !== '*' && charBefore !== '_' && !isUnicodePunct(charBefore)))) {
+        midExists = true;
       }
-      for (let k = oi + 1; !midPossible && k < ci; k++) {
+      for (let k = oi + 1; !midExists && k < ci; k++) {
         const run = delims[k];
-        if (run.ch === closer.ch && run.open && run.close && !run.masked && !run.link &&
-            !(run.inPairCh !== undefined && run.inPairCh !== closer.ch)) midPossible = true;
+        if (run.ch === closeRun.ch && run.open && run.close && !run.masked && !run.link &&
+            !(run.inPairCh !== undefined && run.inPairCh !== closeRun.ch)) midExists = true;
       }
-      if (midPossible) {
+      if (midExists) {
         const scan = markedScan(delims, oi, text);
         if (scan.stop === ci) {
-          const bUsed = Math.min(closer.on, closer.on + scan.m + scan.f);
-          if (bUsed > use) { consume = bUsed; insideTail = closer.ch.repeat(bUsed - use); }
+          const spent = Math.min(closeRun.on, closeRun.on + scan.m + scan.f);
+          if (spent > take) { eat = spent; tailText = closeRun.ch.repeat(spent - take); }
         }
       }
     }
-    const tag = closer.ch === '~' ? 5 : (use === 2 ? 4 : 3);
-    const ni = nodes.indexOf(opener), nj = nodes.indexOf(closer);
-    const children = nodes.slice(ni + 1, nj);
-    if (insideTail !== '') children.push(insideTail);
+    const tag = closeRun.ch === '~' ? 5 : (take === 2 ? 4 : 3);
+    const ai = nodes.indexOf(opener), aj = nodes.indexOf(closeRun);
+    const children = nodes.slice(ai + 1, aj);
+    if (tailText !== '') children.push(tailText);
     const wrap = { k: tag, c: children };
-    opener.s = opener.s.slice(0, opener.s.length - use); opener.n -= use;
-    closer.s = closer.s.slice(consume); closer.n -= consume;
+    opener.s = opener.s.slice(0, opener.s.length - take); opener.n -= take;
+    closeRun.s = closeRun.s.slice(eat); closeRun.n -= eat;
     if (opener.n === 0) opener.active = false;
-    if (closer.n === 0) closer.active = false;
-    nodes.splice(ni + 1, nj - ni - 1, wrap);
+    if (closeRun.n === 0) closeRun.active = false;
+    nodes.splice(ai + 1, aj - ai - 1, wrap);
     // delimiters between opener and closer are now inside the wrap
-    const oiStack = delims.indexOf(opener), ciStack = delims.indexOf(closer);
+    const oiPos = delims.indexOf(opener), ciPos = delims.indexOf(closeRun);
     // keep the delimiters between opener and closer in the stack
-    // (marked inactive) so a later outer opener's marked-scan can still
-    // see them with their original lengths — splicing them out would
-    // make the scan undercount and pair runs marked leaves literal.
-    // Record the innermost pair's char: a run inside a pair of the
-    // OPPOSITE char is invisible to the outer scan (marked's
+    // (marked inactive) so a later outer opener's marked-scan can
+    // still see them with their original lengths — splicing them out
+    // would make the scan undercount and pair runs marked leaves
+    // literal. Record the innermost pair's char: a run inside a pair
+    // of the OPPOSITE char is invisible to the outer scan (marked's
     // emStrongRDelim skip alternative jumps over __...*...__ spans),
     // while a run inside a same-char pair still counts.
-    for (let k = oiStack + 1; k < ciStack; k++) {
-      if (delims[k].inPairCh === undefined) delims[k].inPairCh = closer.ch;
+    for (let k = oiPos + 1; k < ciPos; k++) {
+      if (delims[k].inPairCh === undefined) delims[k].inPairCh = closeRun.ch;
       delims[k].active = false;
     }
-    ci = ciStack;
-    if (closer.n === 0) ci++;
-    // (closer with remaining delims is re-processed against earlier openers)
+    ci = ciPos;
+    if (closeRun.n === 0) ci++;
+    // (a closer with remaining delims is re-processed against earlier openers)
   }
 }
 
