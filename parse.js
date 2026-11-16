@@ -1279,30 +1279,30 @@ function labelHasRunawayTag(text, start, end) {
 }
 
 // Would a link form at the ']' at position `j`? Mirrors
-// tryCloseBracketOpener's decision without mutating anything: the nearest
-// active opener, bracket balance, a valid label, and a resolvable
-// destination/reference. Used to stop a code span from swallowing the
-// ']' (the link regex consumes the backticks as a label chunk first).
+// tryCloseBracketOpener's decision without mutating anything: the
+// nearest active opener, bracket balance, a valid label, and a
+// resolvable destination/reference. Used to stop a code span from
+// swallowing the ']' (the link regex consumes the backticks as a label
+// chunk first).
 function wouldFormLink(text, j, delims, refs) {
   let opener = null;
   for (let d = delims.length - 1; d >= 0; d--) {
     if (delims[d].link && delims[d].active) { opener = delims[d]; break; }
   }
   if (!opener) return false;
-  // bracket balance in the raw text between the opener and this ']'
-  let open = 0, close = 0;
-  for (let k = opener.pos + 1; k < j; k++) {
-    if (text[k] === '[') {
-      let bs = 0;
-      for (let b = k - 1; b >= 0 && text[b] === '\\'; b--) bs++;
-      if (bs % 2 === 0) open++;
-    } else if (text[k] === ']') {
-      let bs = 0;
-      for (let b = k - 1; b >= 0 && text[b] === '\\'; b--) bs++;
-      if (bs % 2 === 0) close++;
+  // bracket balance in the raw text between the opener and this ']':
+  // count unescaped occurrences of one bracket char at a time
+  const countUnescaped = (ch) => {
+    let total = 0;
+    for (let k = opener.pos + 1; k < j; k++) {
+      if (text[k] !== ch) continue;
+      let slashes = 0;
+      for (let b = k - 1; b >= 0 && text[b] === '\\'; b--) slashes++;
+      if (slashes % 2 === 0) total++;
     }
-  }
-  if (open !== close) return false;
+    return total;
+  };
+  if (countUnescaped('[') !== countUnescaped(']')) return false;
   const rawLabel = text.slice(opener.pos + 1, j);
   if (labelHasRunawayTag(text, opener.pos + 1, j)) return false;
   if (text[j + 1] === '(') {
@@ -1332,21 +1332,21 @@ function tryCloseBracket(text, i, nodes, delims, refs) {
   // an inner '[' that is only part of the outer link's text, e.g.
   // cm-512 [link [foo [bar]]](/uri) closes the OUTER '[')
   const n = text.length;
-  for (let di = delims.length - 1; di >= 0; di--) {
-    if (!delims[di].link || !delims[di].active) continue;
-    const opener = delims[di];
-    const ni = nodes.indexOf(opener);
+  for (let d = delims.length - 1; d >= 0; d--) {
+    if (!delims[d].link || !delims[d].active) continue;
+    const opener = delims[d];
+    const ai = nodes.indexOf(opener);
     // the ']' only closes the opener when the brackets balance: every
-    // unmatched '[' inside must be matched by a literal ']' inside, so a
-    // ']' that sits inside a nested bracket pair does not close the outer
-    // one (cm-520: the middle ']' of ![[[foo](uri1)](uri2)](uri3) fails,
-    // the last one forms the image with alt '[foo](uri2)')
+    // unmatched '[' inside must be matched by a literal ']' inside, so
+    // a ']' that sits inside a nested bracket pair does not close the
+    // outer one (cm-520: the middle ']' of ![[[foo](uri1)](uri2)](uri3)
+    // fails, the last one forms the image with alt '[foo](uri2)')
     let open = 0, close = 0;
-    for (let k = ni + 1; k < nodes.length; k++) {
-      const nd = nodes[k];
-      if (typeof nd === 'string') {
-        for (let c = 0; c < nd.length; c++) if (nd[c] === ']') close++;
-      } else if (nd.k === 'd' && nd.link) {
+    for (let k = ai + 1; k < nodes.length; k++) {
+      const node = nodes[k];
+      if (typeof node === 'string') {
+        for (let q = 0; q < node.length; q++) if (node[q] === ']') close++;
+      } else if (node.k === 'd' && node.link) {
         open++;
       }
     }
@@ -1355,13 +1355,13 @@ function tryCloseBracket(text, i, nodes, delims, refs) {
     // [Foo*bar\]] has one escaped ']' in its label)
     for (let k = opener.pos + 1; k < i; k++) {
       if (text[k] !== ']') continue;
-      let bs = 0;
-      for (let b = k - 1; b >= 0 && text[b] === '\\'; b--) bs++;
-      if (bs % 2 === 1) close--;
+      let slashes = 0;
+      for (let b = k - 1; b >= 0 && text[b] === '\\'; b--) slashes++;
+      if (slashes % 2 === 1) close--;
     }
     if (open !== close) continue;
     // a link may not contain another link (an image may contain one)
-    if (!opener.image && containsLink(nodes.slice(ni + 1))) continue;
+    if (!opener.image && containsLink(nodes.slice(ai + 1))) continue;
     const made = tryCloseBracketOpener(text, i, nodes, delims, opener, refs);
     if (made) return made;
   }
@@ -1375,14 +1375,14 @@ function tryCloseBracket(text, i, nodes, delims, refs) {
 // collapsed reference also needs its label to match the label pattern
 // (validLabel); a shortcut reference does not.
 function tryCloseBracketOpener(text, i, nodes, delims, opener, refs) {
-  const ni = nodes.indexOf(opener);
+  const ai = nodes.indexOf(opener);
   const rawLabel = text.slice(opener.pos + 1, i);
   if (labelHasRunawayTag(text, opener.pos + 1, i)) return null;
   let dest = null, title = null, next = i + 1;
   if (text[i + 1] === '(') {
-    const res = parseInlineLink(text, i + 1);
-    if (res && validLabel(rawLabel)) {
-      dest = res.dest; title = res.title; next = res.next;
+    const parsed = parseInlineLink(text, i + 1);
+    if (parsed && validLabel(rawLabel)) {
+      dest = parsed.dest; title = parsed.title; next = parsed.next;
     } else {
       // an inline link that fails falls back to a shortcut reference
       const key = normLabel(rawLabel);
@@ -1392,15 +1392,15 @@ function tryCloseBracketOpener(text, i, nodes, delims, opener, refs) {
     }
   } else if (text[i + 1] === '[') {
     if (!validLabel(rawLabel)) return null;
-    const lab = parseLabel(text, i + 1);
-    if (!lab) return null;
-    const label = lab.label === '' ? null : lab.label;
+    const labelRef = parseLabel(text, i + 1);
+    if (!labelRef) return null;
+    const refLabel = labelRef.label === '' ? null : labelRef.label;
     // a collapsed reference [] uses the link text as its label — the RAW
     // source text (backslashes kept), not the resolved inline text
-    const key = normLabel(label === null ? rawLabel : label);
+    const key = normLabel(refLabel === null ? rawLabel : refLabel);
     const ref = refs.get(key);
     if (!ref) return null;
-    dest = ref.href; title = ref.title; next = lab.next;
+    dest = ref.href; title = ref.title; next = labelRef.next;
   } else {
     // a shortcut reference uses the RAW link text as its label
     const key = normLabel(rawLabel);
@@ -1412,8 +1412,8 @@ function tryCloseBracketOpener(text, i, nodes, delims, opener, refs) {
   if (href === null) return null;
   // emphasis inside the link text is resolved before wrapping
   processEmphasis(nodes, delims, delims.indexOf(opener) + 1, text);
-  const ni2 = nodes.indexOf(opener);
-  let children = nodes.slice(ni2 + 1);
+  const ai2 = nodes.indexOf(opener);
+  let children = nodes.slice(ai2 + 1);
   // extended autolinks do not form inside link text
   if (!opener.image) children = unlinkExtAutolinks(children);
   let node;
@@ -1423,14 +1423,14 @@ function tryCloseBracketOpener(text, i, nodes, delims, opener, refs) {
   } else {
     node = { k: 6, href: escText(href), title: title === null ? null : escText(title), c: children };
   }
-  nodes.splice(ni2, nodes.length - ni2, node);
+  nodes.splice(ai2, nodes.length - ai2, node);
   // remove opener and everything after it from the delimiter stack
-  const oiStack = delims.indexOf(opener);
-  delims.splice(oiStack);
+  const oiPos = delims.indexOf(opener);
+  delims.splice(oiPos);
   if (!opener.image) {
     // links cannot nest: deactivate earlier LINK openers (image openers
     // stay active so an outer image can still form)
-    for (const d of delims) if (d.link && !d.image) d.active = false;
+    for (const cand of delims) if (cand.link && !cand.image) cand.active = false;
   }
   return { next };
 }
@@ -1438,30 +1438,33 @@ function tryCloseBracketOpener(text, i, nodes, delims, opener, refs) {
 // Raw text of the link text between `opener` and the end of `nodes`
 // (numeric refs decoded, escapes resolved — used for reference labels).
 function nodesTextBetween(nodes, opener) {
-  const ni = nodes.indexOf(opener);
+  const ai = nodes.indexOf(opener);
   let s = '';
-  for (let k = ni + 1; k < nodes.length; k++) {
-    const nd = nodes[k];
-    if (typeof nd === 'string') s += nd;
-    else if (nd.k === 0) s += nd.s;
-    else if (nd.k === 1) s += nd.s;
-    else if (nd.k === 8) s += nd.raw !== undefined ? nd.raw : nd.s;
-    else if (nd.k === 'd') s += nd.s;
-    else if (nd.k === 3 || nd.k === 4 || nd.k === 5 || nd.k === 6) s += nodesTextOf(nd.c);
-    else if (nd.k === 7) s += nd.alt;
+  for (let k = ai + 1; k < nodes.length; k++) {
+    const node = nodes[k];
+    if (typeof node === 'string') { s += node; continue; }
+    switch (node.k) {
+      case 0: case 1: s += node.s; break;
+      case 8: s += node.raw !== undefined ? node.raw : node.s; break;
+      case 'd': s += node.s; break;
+      case 3: case 4: case 5: case 6: s += nodesTextOf(node.c); break;
+      case 7: s += node.alt; break;
+    }
   }
   return s;
 }
 function nodesTextOf(children) {
   let s = '';
-  for (const nd of children) {
-    if (typeof nd === 'string') s += nd;
-    else if (nd.k === 0 || nd.k === 1) s += nd.s;
-    else if (nd.k === 8) s += nd.raw !== undefined ? nd.raw : nd.s;
-    else if (nd.k === 9) s += nd.s;
-    else if (nd.k === 'd') s += nd.s;
-    else if (nd.k === 3 || nd.k === 4 || nd.k === 5 || nd.k === 6) s += nodesTextOf(nd.c);
-    else if (nd.k === 7) s += nd.alt;
+  for (const node of children) {
+    if (typeof node === 'string') { s += node; continue; }
+    switch (node.k) {
+      case 0: case 1: s += node.s; break;
+      case 8: s += node.raw !== undefined ? node.raw : node.s; break;
+      case 9: s += node.s; break;
+      case 'd': s += node.s; break;
+      case 3: case 4: case 5: case 6: s += nodesTextOf(node.c); break;
+      case 7: s += node.alt; break;
+    }
   }
   return s;
 }
