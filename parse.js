@@ -1965,6 +1965,19 @@ function isTableHeader(b1, b2) {
   return aligns !== null && aligns.length === head.length;
 }
 
+// Whitespace-only line that marked's table-body regex still consumes as
+// an (empty) row: its blank check is ` *\n` (spaces only — a tab does not
+// match), and its indented-code check needs a character after the indent,
+// so a line of <=3 spaces + a trailing tab is a row, not a table end.
+function isTableBlankRow(b) {
+  if (!b) return false;
+  let sp = 0;
+  while (sp < b.length && b[sp] === ' ') sp++;
+  if (sp === b.length) return false; // spaces-only: blank
+  if (sp >= 4) return false; // 4-space indent: code
+  return sp + 1 === b.length; // tab must be the last character
+}
+
 function parseTable(lines, i, end) {
   const head = splitTableRow(body(lines[i]));
   const aligns = parseDelimiterRow(body(lines[i + 1]));
@@ -1972,7 +1985,10 @@ function parseTable(lines, i, end) {
   let j = i + 2;
   while (j < end) {
     const line = lines[j];
-    if (isBlank(line)) break;
+    if (isBlank(line)) {
+      if (isTableBlankRow(body(line))) { rows.push(splitTableRow(body(line))); j++; continue; }
+      break;
+    }
     const b = body(line);
     if (indentCols(b) >= 4) break;
     if (matchATX(b) || matchFencedStart(b) || isThematicBreak(b)) break;
