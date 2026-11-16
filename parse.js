@@ -162,6 +162,15 @@ const BR = { k: 2 }; // hard break
 
 // Delimiter nodes double as text nodes: {k:'d', s, ch, n, open, close,
 // active, link, image}. Plain text is a bare string.
+// marked's <a>-tag inLink leak: an opening <a...> tag parsed as INLINE
+// HTML (in a paragraph — a lone <a> on its own line is an HTML block and
+// does NOT trigger this) sets a document-persistent state that suppresses
+// extended autolinks (www/scheme/email) in all following inline content,
+// across paragraphs, until a closing </a> appears. Bracket autolinks
+// <...>, bracket emails and inline links are NOT suppressed. Reset per
+// document in parse().
+let inLink = false;
+
 function parseInline(text, refs) {
   const nodes = [];
   const delims = [];
@@ -239,7 +248,14 @@ function parseInline(text, refs) {
       const auto = tryBracketAutolink(text, i);
       if (auto) { flush(); nodes.push(auto.node); i = auto.next; continue; }
       const tag = tryHtmlTag(text, i);
-      if (tag) { flush(); nodes.push({ k: 1, s: tag.text }); i = tag.next; continue; }
+      if (tag) {
+        flush(); nodes.push({ k: 1, s: tag.text });
+        // <a>-tag inLink leak: opening <a> sets it, </a> clears it
+        const t = tag.text;
+        if (t[1] === '/' && (t[2] === 'a' || t[2] === 'A') && (t[3] === '>' || t[3] === ' ' || t[3] === '\t' || t[3] === '\n')) inLink = false;
+        else if ((t[1] === 'a' || t[1] === 'A') && (t[2] === '>' || t[2] === ' ' || t[2] === '\t' || t[2] === '\n') && !/\/>$/.test(t)) inLink = true;
+        i = tag.next; continue;
+      }
       buf += '&lt;'; i++; continue; // literal '<' is escaped here directly
     }
 
@@ -324,19 +340,19 @@ function parseInline(text, refs) {
     // the autolink is skipped (a bracket autolink <...> still forms).
     // The active-opener scan runs only after a match is found, so it
     // does not cost O(delims) at every word start.
-    if (ch === 'w' && text.startsWith('www.', i)) {
+    if (ch === 'w' && !inLink && text.startsWith('www.', i)) {
       const prev = i === 0 ? '' : text[i - 1];
       if (prev === '' || isWhitespace(prev) || prev === '(' || prev === '*' || prev === '_' || prev === '~') {
         const m = matchExtendedAutolink(text, i, 'www');
         if (m && !delims.some((d) => d.link && d.active)) { flush(); nodes.push(m.node); i = m.next; continue; }
       }
     }
-    if ((ch === 'h' || ch === 'H' || ch === 'f' || ch === 'F')) {
+    if ((ch === 'h' || ch === 'H' || ch === 'f' || ch === 'F') && !inLink) {
       const m = matchExtendedAutolink(text, i, 'scheme');
       if (m && !delims.some((d) => d.link && d.active)) { flush(); nodes.push(m.node); i = m.next; continue; }
     }
     // mailto:/xmpp: (lowercase only) at the start or after a non-alphanumeric
-    if ((ch === 'm' || ch === 'x') && (text.startsWith('mailto:', i) || text.startsWith('xmpp:', i))) {
+    if ((ch === 'm' || ch === 'x') && !inLink && (text.startsWith('mailto:', i) || text.startsWith('xmpp:', i))) {
       const prev = i === 0 ? '' : text[i - 1];
       if (prev === '' || !/[A-Za-z0-9]/.test(prev)) {
         const m = matchEmailAt(text, i);
@@ -344,7 +360,7 @@ function parseInline(text, refs) {
       }
     }
     // plain email: current char is a local char and the previous one is not
-    if (/[A-Za-z0-9._+-]/.test(ch)) {
+    if (/[A-Za-z0-9._+-]/.test(ch) && !inLink) {
       const prev = i === 0 ? '' : text[i - 1];
       if (prev === '' || !/[A-Za-z0-9._+-]/.test(prev)) {
         const m = matchEmailAt(text, i);
@@ -955,7 +971,7 @@ const BLOCK_TAGS = new Set(('address article aside base basefont blockquote body
 // lastKind ('para'|'table'|other), lastNonBlank}. When stripAtEnd is true
 // (inner content of a blockquote/list item), an HTML block running to the
 // end of the range loses its trailing newline.
-function parseBlocks(lines, start, end, refs, tight, stripAtEnd) {
+function parseBlocks(lines, start, end, refs, tight, stripAtEnd, inList) {
   const blocks = [];
   let blankBetween = false;
   let i = start;
@@ -989,7 +1005,7 @@ function parseBlocks(lines, start, end, refs, tight, stripAtEnd) {
     // block start, so it is code)
     if (indentCols(b) >= 4) { const r = parseIndentedCode(lines, i, end); blocks.push(r.block); i = r.next; continue; }
     // paragraph / table / link-reference definitions
-    const r = parseParagraph(lines, i, end, refs, stripAtEnd);
+    const r = parseParagraph(lines, i, end, refs, stripAtEnd, inList);
     if (r.block) blocks.push(r.block);
     i = r.next;
   }
@@ -1389,9 +1405,12 @@ function matchListStart(b) {
 }
 
 // Does this list item interrupt a paragraph? Bullets always; ordered only
-// when the start number is 1; an empty item never interrupts.
-function listInterruptsPara(lst, b) {
-  if (lst.ordered && lst.num !== 1) return false;
+// when the start number is 1 — except inside a list item's content, where
+// any list marker starts a nested list (marked: '- foo\n  49. Uses' makes
+// a nested <ol start="49">, while a blockquote or top-level paragraph
+// keeps '49.' as text). An empty item never interrupts.
+function listInterruptsPara(lst, b, inList) {
+  if (lst.ordered && lst.num !== 1 && !inList) return false;
   // empty item: nothing but whitespace after the marker
   let j = lst.markerEndIdx;
   while (j < b.length && (b[j] === ' ' || b[j] === '\t')) j++;
@@ -1478,7 +1497,7 @@ function parseList(lines, i, end, refs) {
     const fixups = [];
     let res = null;
     const ensureParsed = () => {
-      if (!res) { res = parseBlocks(itemLines, 0, itemLines.length, refs, false, true); applyLazyFixups(res, fixups); }
+      if (!res) { res = parseBlocks(itemLines, 0, itemLines.length, refs, false, true, true); applyLazyFixups(res, fixups); }
       return res;
     };
     while (j < end) {
@@ -1775,7 +1794,7 @@ function setextBlocked(lines, j, k) {
   return false;
 }
 
-function parseParagraph(lines, i, end, refs, inner) {
+function parseParagraph(lines, i, end, refs, inner, inList) {
   let j = i;
   // leading link-reference definitions
   while (j < end) {
@@ -1791,7 +1810,7 @@ function parseParagraph(lines, i, end, refs, inner) {
     const t = parseTable(lines, j, end);
     return { block: t.block, next: t.next };
   }
-  if (startsInterruptBlock(firstB)) return { block: null, next: j };
+  if (startsInterruptBlock(firstB, inList)) return { block: null, next: j };
   const paraLines = [];
   let k = j;
   while (k < end) {
@@ -1826,7 +1845,7 @@ function parseParagraph(lines, i, end, refs, inner) {
         }
         break;
       }
-      if (startsInterruptBlock(b)) break;
+      if (startsInterruptBlock(b, inList)) break;
     }
     paraLines.push(lines[k]);
     k++;
@@ -1835,14 +1854,14 @@ function parseParagraph(lines, i, end, refs, inner) {
 }
 
 // True when the line starts a block that interrupts a paragraph.
-function startsInterruptBlock(b) {
+function startsInterruptBlock(b, inList) {
   if (matchATX(b)) return true;
   if (matchFencedStart(b)) return true;
   if (isThematicBreak(b)) return true;
   if (htmlBlockType(b, true) > 0) return true;
   if (stripQuoteText(b) !== null) return true;
   const lst = matchListStart(b);
-  if (lst && listInterruptsPara(lst, b)) return true;
+  if (lst && listInterruptsPara(lst, b, inList)) return true;
   return false;
 }
 
@@ -1952,6 +1971,7 @@ function renderListItem(item, refs, tight) {
 /* ---------------- entry point ---------------- */
 
 export function parse(markdown) {
+  inLink = false;
   const src = String(markdown).replace(/\r\n?/g, '\n');
   const lines = splitLines(src);
   const refs = new Map();
