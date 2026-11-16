@@ -611,7 +611,10 @@ function parseInline(text, refs) {
   // the link (doc-09/doc-28/doc-35). Delimiters consumed by a link that
   // formed are already off the stack, so only unformed labels and stray
   // spans are affected here.
-  if (delims.length > 0) {
+  // The scan is only worth running when some delimiter could actually
+  // be masked by it: link delimiters and already-masked ones are
+  // skipped by the marking loop anyway.
+  if (delims.some((d) => !d.link && !d.masked)) {
     const spans = blockSkipRanges(text);
     let si = 0;
     for (const delim of delims) {
