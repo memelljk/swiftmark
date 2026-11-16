@@ -1474,23 +1474,23 @@ function nodesTextOf(children) {
 // Bracketed autolink <scheme:...> or <email>; returns {node, next} or null.
 function tryBracketAutolink(text, i) {
   const n = text.length;
-  let j = i + 1;
-  let content = '';
-  while (j < n && text[j] !== '>' && text[j] !== ' ' && text[j] !== '\n' && text[j] !== '<') {
-    content += text[j]; j++;
+  let p = i + 1;
+  let inner = '';
+  while (p < n && text[p] !== '>' && text[p] !== ' ' && text[p] !== '\n' && text[p] !== '<') {
+    inner += text[p]; p++;
   }
-  if (j >= n || text[j] !== '>') return null;
+  if (p >= n || text[p] !== '>') return null;
   // scheme autolink: scheme 2..32 chars, first letter, then : and anything
-  const scheme = /^([A-Za-z][A-Za-z0-9+.-]{1,31}):/.exec(content);
-  if (scheme) {
-    const href = cleanUrl(content);
+  const schemeHit = /^([A-Za-z][A-Za-z0-9+.-]{1,31}):/.exec(inner);
+  if (schemeHit) {
+    const href = cleanUrl(inner);
     if (href === null) return null;
-    return { node: { k: 6, auto: 'bracket', href: escFull(href), title: null, c: [{ k: 8, s: escFull(content), raw: content }] }, next: j + 1 };
+    return { node: { k: 6, auto: 'bracket', href: escFull(href), title: null, c: [{ k: 8, s: escFull(inner), raw: inner }] }, next: p + 1 };
   }
   // email autolink
-  const email = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.exec(content);
-  if (email) {
-    return { node: { k: 6, auto: 'bracket', href: 'mailto:' + escFull(content), title: null, c: [{ k: 8, s: escFull(content), raw: content }] }, next: j + 1 };
+  const emailHit = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.exec(inner);
+  if (emailHit) {
+    return { node: { k: 6, auto: 'bracket', href: 'mailto:' + escFull(inner), title: null, c: [{ k: 8, s: escFull(inner), raw: inner }] }, next: p + 1 };
   }
   return null;
 }
@@ -1498,104 +1498,105 @@ function tryBracketAutolink(text, i) {
 const EMAIL_LOCAL = /[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]/;
 const EMAIL_DOMAIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/;
 
-// Extended email autolink triggered at '@' (position `i`), with the current
-// text run in `buf`. Returns {node, next, takeFromBuf} or null.
-// Extended email autolink matched FORWARD from position `i` (the start of
-// the local part, or of a lowercase 'mailto:'/'xmpp:' protocol).
+// Extended email autolink, matched FORWARD from position `i` — the start
+// of the local part, or of a lowercase 'mailto:'/'xmpp:' protocol.
 // Local [A-Za-z0-9._+-]+, '@', domain [a-zA-Z0-9-_]+
 // (?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+ with a (?![\w-]) lookahead, so a
 // trailing '-' or '_' kills the match (gfm-632) and a trailing '.' is
 // left as literal text. xmpp: takes one optional /segment of
 // [A-Za-z0-9@.]+ (gfm-634/635). Returns {node, next} or null.
-// (Manual scanning, no text.slice: this runs at every word start.)
-// `delims` is the live delimiter stack: marked tokenizes emphasis BEFORE
-// autolinks, so an email inside _..._ / __...__ is matched as if the
-// closing '_' run were not there. When a domain segment (or the email
-// itself) ends in a '_' run and the nearest '_' delimiter is an unmatched
-// opener, that run is treated as the emphasis closer, not as part of the
-// email — but only when the run is right-flanking (followed by the end,
-// whitespace, or punctuation), so a '_' run followed by a word char
-// (which would be an opener, not a closer) still kills the match.
+// (Hand-scanned, no text.slice on the hot path: this runs at every word
+// start.) `delims` is the live delimiter stack: marked tokenizes
+// emphasis BEFORE autolinks, so an email inside _..._ / __...__ is
+// matched as if the closing '_' run were not there. When a domain
+// segment (or the email itself) ends in a '_' run and the nearest '_'
+// delimiter is an unmatched opener, that run is treated as the emphasis
+// closer, not as part of the email — but only when the run is
+// right-flanking (followed by the end, whitespace, or punctuation), so
+// a '_' run followed by a word char (which would be an opener, not a
+// closer) still kills the match.
 function matchEmailAt(text, i, delims) {
   const n = text.length;
-  let proto = null, j = i;
-  if (text.startsWith('mailto:', i)) { proto = 'mailto:'; j = i + 7; }
-  else if (text.startsWith('xmpp:', i)) { proto = 'xmpp:'; j = i + 5; }
+  let scheme = null, p = i;
+  if (text.startsWith('mailto:', i)) { scheme = 'mailto:'; p = i + 7; }
+  else if (text.startsWith('xmpp:', i)) { scheme = 'xmpp:'; p = i + 5; }
   // local part: [A-Za-z0-9._+-]+
-  const ls = j;
-  while (j < n && isEmailLocal(text[j])) j++;
-  if (j === ls) return null;
-  const local = text.slice(ls, j);
-  if (text[j] !== '@') return null;
+  const localStart = p;
+  while (p < n && isEmailLocal(text[p])) p++;
+  if (p === localStart) return null;
+  const local = text.slice(localStart, p);
+  if (text[p] !== '@') return null;
   // domain: [a-zA-Z0-9-_]+ (?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+
-  let k = j + 1;
-  const ds = k;
-  while (k < n && isDomainChar(text[k])) k++;
-  if (k === ds) return null;
-  let end = k, hasDot = false;
+  let q = p + 1;
+  const domainStart = q;
+  while (q < n && isDomainChar(text[q])) q++;
+  if (q === domainStart) return null;
+  let domainEnd = q, hasDot = false;
   // lazily computed (only when a trailing '_' run is actually met):
   // is the nearest '_' delimiter an unmatched opener?
-  let usOpener = null;
-  const hasUsOpener = () => {
-    if (usOpener === null) {
-      usOpener = false;
+  let usOpen = null;
+  const nearestUsOpener = () => {
+    if (usOpen === null) {
+      usOpen = false;
       if (delims) for (let d = delims.length - 1; d >= 0; d--) {
-        if (delims[d].ch === '_') { usOpener = delims[d].open && delims[d].active; break; }
+        if (delims[d].ch === '_') { usOpen = delims[d].open && delims[d].active; break; }
       }
     }
-    return usOpener;
+    return usOpen;
   };
   // is the '_' run starting at `p` a plausible emphasis closer? The char
   // before it is a domain char (alnum), so right-flanking is decided by
   // the char after the run alone.
-  const usRunIsCloser = (p) => {
+  const usRunCloses = (p) => {
     let q = p;
     while (q < n && text[q] === '_') q++;
     const after = q >= n ? '' : text[q];
     return after === '' || isWhitespace(after) || isUnicodePunct(after);
   };
-  while (k < n && text[k] === '.') {
-    let m = k + 1;
-    while (m < n && isDomainChar(text[m])) m++;
+  while (q < n && text[q] === '.') {
+    let r = q + 1;
+    while (r < n && isDomainChar(text[r])) r++;
     // the segment after the dot must end in an alphanumeric — unless it
     // ends in a '_' run that closes an unmatched '_' opener, in which
     // case the run belongs to the emphasis, not the domain
-    if (m > k + 1 && !isAlnum(text[m - 1])) {
-      let t = m;
-      while (t > k + 1 && text[t - 1] === '_') t--;
-      if (t > k + 1 && isAlnum(text[t - 1]) && hasUsOpener() && usRunIsCloser(t)) m = t;
+    if (r > q + 1 && !isAlnum(text[r - 1])) {
+      let back = r;
+      while (back > q + 1 && text[back - 1] === '_') back--;
+      if (back > q + 1 && isAlnum(text[back - 1]) && nearestUsOpener() && usRunCloses(back)) r = back;
       else break;
     }
-    if (m === k + 1 || !isAlnum(text[m - 1])) break;
-    end = m; k = m; hasDot = true;
+    if (r === q + 1 || !isAlnum(text[r - 1])) break;
+    domainEnd = r; q = r; hasDot = true;
   }
   if (!hasDot) return null;
-  const domain = text.slice(ds, end);
-  const after = text[end];
+  const domain = text.slice(domainStart, domainEnd);
+  const nextCh = text[domainEnd];
   // the (?![\w-]) lookahead: a trailing alnum or '-' kills the match; a
   // trailing '_' kills it too — unless that '_' run closes an unmatched
   // '_' opener (the email sits inside emphasis)
-  if (after !== undefined && (isAlnum(after) || after === '-' || (after === '_' && !(hasUsOpener() && usRunIsCloser(end))))) return null;
+  if (nextCh !== undefined && (isAlnum(nextCh) || nextCh === '-' || (nextCh === '_' && !(nearestUsOpener() && usRunCloses(domainEnd))))) return null;
   const email = local + '@' + domain;
-  let full = (proto || '') + email;
-  let next = end;
-  if (proto === 'xmpp:' && text[next] === '/') {
-    let m = next + 1;
-    while (m < n && (isAlnum(text[m]) || text[m] === '@' || text[m] === '.')) m++;
-    if (m > next + 1) { full += text.slice(next, m); next = m; }
+  let full = (scheme || '') + email;
+  let next = domainEnd;
+  if (scheme === 'xmpp:' && text[next] === '/') {
+    let r = next + 1;
+    while (r < n && (isAlnum(text[r]) || text[r] === '@' || text[r] === '.')) r++;
+    if (r > next + 1) { full += text.slice(next, r); next = r; }
   }
-  const href = proto === 'xmpp:' ? escText(full) : 'mailto:' + escText(email);
+  const href = scheme === 'xmpp:' ? escText(full) : 'mailto:' + escText(email);
   return { node: { k: 6, auto: 'ext', href, title: null, c: [{ k: 8, s: escFull(full), raw: full }] }, next };
 }
 
 function isEmailLocal(c) {
-  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c === '.' || c === '_' || c === '+' || c === '-';
+  return c === '.' || c === '_' || c === '+' || c === '-' ||
+    (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
 }
 function isDomainChar(c) {
-  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c === '-' || c === '_';
+  return c === '-' || c === '_' ||
+    (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
 }
 function isAlnum(c) {
-  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+  return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
 }
 
 // GFM extended-autolink backpedal, as a hand-written chunk scanner.
