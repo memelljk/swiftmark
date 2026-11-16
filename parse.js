@@ -168,14 +168,37 @@ const BR = { k: 2 }; // hard break
 // extended autolinks (www/scheme/email) in all following inline content,
 // across paragraphs, until a closing </a> appears. Bracket autolinks
 // <...>, bracket emails and inline links are NOT suppressed. Reset per
-// document in parse().
+// document in parse(). inRawBlock is marked's other inline state: inside
+// <pre>/<code>/<kbd>/<script> text, character references are NOT decoded
+// and text is emitted raw (unescaped). Also reset per document.
 let inLink = false;
+let inRawBlock = false;
+
+// For a tag's text, the raw-block tag name when the tag is a
+// <pre>/<code>/<kbd>/<script> opener or closer whose name is followed by
+// whitespace or '>' (marked's start/endPreScriptTag tests), with a leading
+// '/' for closers; null otherwise. <pre/> and <codex> do not count.
+function rawBlockTagName(t) {
+  let j = 1, close = false;
+  if (t[j] === '/') { close = true; j++; }
+  let k = j;
+  while (k < t.length && ((t[k] >= 'a' && t[k] <= 'z') || (t[k] >= 'A' && t[k] <= 'Z'))) k++;
+  const name = t.slice(j, k).toLowerCase();
+  if (name !== 'pre' && name !== 'code' && name !== 'kbd' && name !== 'script') return null;
+  const after = t[k];
+  if (after !== '>' && !isWhitespace(after)) return null;
+  return (close ? '/' : '') + name;
+}
 
 function parseInline(text, refs) {
   const nodes = [];
   const delims = [];
   let buf = '';
-  const flush = () => { if (buf !== '') { nodes.push(buf); buf = ''; } };
+  // Text runs accumulated while inRawBlock is on are emitted as raw nodes
+  // (k:9, rendered verbatim — no entity decoding, no escaping), matching
+  // marked's inRawBlock text tokens. A flush always happens at a tag
+  // boundary, so a run never straddles the raw-block edge.
+  const flush = () => { if (buf !== '') { nodes.push(inRawBlock ? { k: 9, s: buf, raw: buf } : buf); buf = ''; } };
   const n = text.length;
   let i = 0;
 
@@ -209,8 +232,14 @@ function parseInline(text, refs) {
       }
       if (nx !== undefined && isAsciiPunct(nx.charCodeAt(0))) {
         // a backslash-escaped '&' is a literal ampersand, never the start
-        // of an entity: pre-escape it so the renderer leaves it escaped
-        buf += nx === '&' ? '&amp;' : nx;
+        // of an entity: pre-escape it so the renderer leaves it escaped.
+        // Inside a raw block the text is emitted verbatim, so every
+        // escapable character is pre-escaped here instead.
+        if (inRawBlock) {
+          buf += nx === '&' ? '&amp;' : nx === '<' ? '&lt;' : nx === '>' ? '&gt;' : nx === '"' ? '&quot;' : nx === "'" ? '&#39;' : nx;
+        } else {
+          buf += nx === '&' ? '&amp;' : nx;
+        }
         i += 2; continue;
       }
       buf += '\\'; i++; continue;
@@ -220,17 +249,24 @@ function parseInline(text, refs) {
     if (ch === '`') {
       let run = 0;
       while (i + run < n && text[i + run] === '`') run++;
-      // find a matching run of exactly `run` backticks
-      let j = i + run, found = -1;
+      // find a matching run of exactly `run` backticks — but stop at a
+      // ']' that would close an active link opener: the link regex
+      // consumes the backticks as a label chunk first, so the code span
+      // must not swallow that ']' (a code span whose closer really is
+      // past the ']' only forms when the link cannot form)
+      let j = i + run, found = -1, abort = false;
       while (j < n) {
         if (text[j] === '`') {
           let r2 = 0;
           while (j + r2 < n && text[j + r2] === '`') r2++;
           if (r2 === run) { found = j; break; }
           j += r2;
+        } else if (text[j] === ']' && (text[j + 1] === '(' || text[j + 1] === '[' || j + 1 >= n)) {
+          if (wouldFormLink(text, j, delims, refs)) { abort = true; break; }
+          j++;
         } else j++;
       }
-      if (found < 0) { buf += '`'.repeat(run); i += run; continue; }
+      if (found < 0 || abort) { buf += '`'.repeat(run); i += run; continue; }
       let content = text.slice(i + run, found).replace(/\n/g, ' ');
       // an empty code span is literal text, not a code node
       if (content === '') { buf += '`'.repeat(run) + '`'.repeat(run); i = found + run; continue; }
@@ -250,18 +286,32 @@ function parseInline(text, refs) {
       const tag = tryHtmlTag(text, i);
       if (tag) {
         flush(); nodes.push({ k: 1, s: tag.text });
-        // <a>-tag inLink leak: opening <a> sets it, </a> clears it
+        // marked's tag state, exactly as its startATag/endATag and
+        // start/endPreScriptTag tests: an <a> opens inLink only when the
+        // char after the 'a' is a SPACE (<a> and <a/> and <a\t...> do
+        // not; a self-closing <a /> DOES), and only an exact </a> closes
+        // it (</a > does not). A <pre>/<code>/<kbd>/<script> opener
+        // (name followed by whitespace or '>') turns inRawBlock on, and
+        // any of the four closers turns it off again.
         const t = tag.text;
-        if (t[1] === '/' && (t[2] === 'a' || t[2] === 'A') && (t[3] === '>' || t[3] === ' ' || t[3] === '\t' || t[3] === '\n')) inLink = false;
-        else if ((t[1] === 'a' || t[1] === 'A') && (t[2] === '>' || t[2] === ' ' || t[2] === '\t' || t[2] === '\n') && !/\/>$/.test(t)) inLink = true;
+        if (!inLink && t.length >= 3 && (t[1] === 'a' || t[1] === 'A') && t[2] === ' ') inLink = true;
+        else if (inLink && t.length === 4 && t[1] === '/' && (t[2] === 'a' || t[2] === 'A') && t[3] === '>') inLink = false;
+        const rawName = rawBlockTagName(t);
+        if (rawName) {
+          if (!inRawBlock && rawName[0] !== '/') inRawBlock = true;
+          else if (inRawBlock && rawName[0] === '/') inRawBlock = false;
+        }
         i = tag.next; continue;
       }
-      buf += '&lt;'; i++; continue; // literal '<' is escaped here directly
+      // literal '<': escaped here directly — except inside a raw block,
+      // where text is emitted verbatim
+      buf += inRawBlock ? '<' : '&lt;'; i++; continue;
     }
 
     // --- '&': numeric character reference (named entities stay literal) ---
+    // Inside a raw block, references are NOT decoded: the '&' is literal.
     if (ch === '&') {
-      const dec = decodeNumRefAt(text, i);
+      const dec = inRawBlock ? null : decodeNumRefAt(text, i);
       if (dec) {
         // a decoded '&' is a literal ampersand, never an entity start
         buf += dec[0] === '&' ? '&amp;' : dec[0];
@@ -335,36 +385,43 @@ function parseInline(text, refs) {
     // --- extended autolinks (GFM): www. / scheme:// / email / mailto: / xmpp: ---
     // forward matching from the word start, so a '_' inside an email
     // local part never becomes an emphasis delimiter first (gfm-632).
-    // Extended autolinks do not form inside link text: while a link or
-    // image opener is active, the text may become that link's text, so
-    // the autolink is skipped (a bracket autolink <...> still forms).
-    // The active-opener scan runs only after a match is found, so it
-    // does not cost O(delims) at every word start.
+    // Extended autolinks do not form inside link text, but that is decided
+    // when the link forms (unlinkExtAutolinks turns them back into plain
+    // text), NOT by scanning the openers here: an UNRESOLVED '[' must not
+    // suppress autolinks after it (marked only suppresses them inside a
+    // resolved link's text). A raw <a> tag does suppress them (inLink).
+    // www. needs a word start: whitespace, '(', '*', '_', '~', or the end
+    // of a previous token (an HTML tag, code span, link, ... — after such
+    // a token, marked's url tokenizer is tried at the fresh position).
     if (ch === 'w' && !inLink && text.startsWith('www.', i)) {
       const prev = i === 0 ? '' : text[i - 1];
-      if (prev === '' || isWhitespace(prev) || prev === '(' || prev === '*' || prev === '_' || prev === '~') {
-        const m = matchExtendedAutolink(text, i, 'www');
-        if (m && !delims.some((d) => d.link && d.active)) { flush(); nodes.push(m.node); i = m.next; continue; }
+      // a delimiter node (k:'d') is not a token: after '[' the www. must
+      // still be rejected (prev is '['), only real tokens count
+      const lastNd = nodes.length > 0 ? nodes[nodes.length - 1] : null;
+      const atTokenBoundary = buf === '' && lastNd !== null && typeof lastNd !== 'string' && lastNd.k !== 'd';
+      if (prev === '' || isWhitespace(prev) || prev === '(' || prev === '*' || prev === '_' || prev === '~' || atTokenBoundary) {
+        const m = matchExtendedAutolink(text, i, 'www', delims);
+        if (m) { flush(); nodes.push(m.node); i = m.next; continue; }
       }
     }
     if ((ch === 'h' || ch === 'H' || ch === 'f' || ch === 'F') && !inLink) {
-      const m = matchExtendedAutolink(text, i, 'scheme');
-      if (m && !delims.some((d) => d.link && d.active)) { flush(); nodes.push(m.node); i = m.next; continue; }
+      const m = matchExtendedAutolink(text, i, 'scheme', delims);
+      if (m) { flush(); nodes.push(m.node); i = m.next; continue; }
     }
     // mailto:/xmpp: (lowercase only) at the start or after a non-alphanumeric
     if ((ch === 'm' || ch === 'x') && !inLink && (text.startsWith('mailto:', i) || text.startsWith('xmpp:', i))) {
       const prev = i === 0 ? '' : text[i - 1];
       if (prev === '' || !/[A-Za-z0-9]/.test(prev)) {
-        const m = matchEmailAt(text, i);
-        if (m && !delims.some((d) => d.link && d.active)) { flush(); nodes.push(m.node); i = m.next; continue; }
+        const m = matchEmailAt(text, i, delims);
+        if (m) { flush(); nodes.push(m.node); i = m.next; continue; }
       }
     }
     // plain email: current char is a local char and the previous one is not
     if (/[A-Za-z0-9._+-]/.test(ch) && !inLink) {
       const prev = i === 0 ? '' : text[i - 1];
       if (prev === '' || !/[A-Za-z0-9._+-]/.test(prev)) {
-        const m = matchEmailAt(text, i);
-        if (m && !delims.some((d) => d.link && d.active)) { flush(); nodes.push(m.node); i = m.next; continue; }
+        const m = matchEmailAt(text, i, delims);
+        if (m) { flush(); nodes.push(m.node); i = m.next; continue; }
       }
     }
 
@@ -399,6 +456,7 @@ function renderNodes(nodes) {
         break;
       }
       case 8: out += nd.s; break; // pre-escaped text (autolink text)
+      case 9: out += nd.s; break; // raw-block text (verbatim, unescaped)
       case 'd': out += escText(nd.s); break;
     }
   }
@@ -591,11 +649,184 @@ function altTextOf(children) {
     else if (nd.k === 0) s += nd.s;
     else if (nd.k === 1 || nd.k === 2) { /* raw HTML / hard break: nothing */ }
     else if (nd.k === 8) s += nd.raw !== undefined ? nd.raw : nd.s;
+    else if (nd.k === 9) s += nd.s;
     else if (nd.k === 'd') s += nd.s;
     else if (nd.k === 3 || nd.k === 4 || nd.k === 5 || nd.k === 6) s += altTextOf(nd.c);
     else if (nd.k === 7) s += nd.alt;
   }
   return s;
+}
+
+// --- link-label validation (marked's link/reflink label pattern) ---
+// A label is valid when its whole raw text is consumable by these chunks
+// (a hand-written scanner for the same grammar, no regex copy):
+//   [ ... ]  a nested bracket group (inner brackets are one level deep)
+//   \x       an escaped character
+//   `...`    a code-span chunk: a maximal backtick run, non-backtick
+//            middle, a maximal backtick run (the first backtick run after
+//            the opener is the closer — the middle cannot hold backticks)
+//   ``+      a run of 2+ backticks immediately before the closing ']'
+//   x        any other single character (not '[', ']', '\', '`')
+// A shortcut reference does NOT use this pattern (its label may hold
+// backticks freely), so this is only applied to inline links and
+// full/collapsed references.
+function validLabel(raw) {
+  const n = raw.length;
+  let pos = 0;
+  while (pos < n) {
+    const c = raw[pos];
+    if (c === '[') {
+      const end = matchLabelBracket(raw, pos);
+      if (end < 0) return false;
+      pos = end;
+    } else if (c === '\\') {
+      if (pos + 1 >= n) return false;
+      pos += 2;
+    } else if (c === '`') {
+      // a run of 2+ backticks reaching the end of the label
+      let k = pos;
+      while (k < n && raw[k] === '`') k++;
+      if (k === n && k - pos >= 2) return true;
+      const end = matchLabelCodeSpan(raw, pos);
+      if (end < 0) return false;
+      pos = end;
+    } else if (c === ']') {
+      return false;
+    } else {
+      pos++;
+    }
+  }
+  return true;
+}
+
+// Nested bracket group: '[' + (inner bracket | escaped char |
+// non-bracket char)* + ']'. Returns the index after ']' or -1.
+function matchLabelBracket(s, pos) {
+  let k = pos + 1;
+  while (k < s.length) {
+    const c = s[k];
+    if (c === '[') {
+      const inner = matchLabelBracketLe(s, k);
+      if (inner < 0) return -1;
+      k = inner;
+    } else if (c === '\\') {
+      if (k + 1 >= s.length) return -1;
+      k += 2;
+    } else if (c === ']') {
+      return k + 1;
+    } else {
+      k++;
+    }
+  }
+  return -1;
+}
+
+// One-level bracket group (marked's `brackets`): '[' + (escaped char |
+// non-bracket char)* + ']'. Returns the index after ']' or -1.
+function matchLabelBracketLe(s, pos) {
+  let k = pos + 1;
+  while (k < s.length) {
+    const c = s[k];
+    if (c === '\\') {
+      if (k + 1 >= s.length) return -1;
+      k += 2;
+    } else if (c === ']') {
+      return k + 1;
+    } else if (c === '[') {
+      return -1;
+    } else {
+      k++;
+    }
+  }
+  return -1;
+}
+
+// Code-span chunk: a maximal backtick run, then non-backtick chars, then
+// the first backtick run after it (also maximal). Returns the index after
+// the closing run, or -1 when there is no closing run.
+function matchLabelCodeSpan(s, pos) {
+  const n = s.length;
+  let open = pos;
+  while (open < n && s[open] === '`') open++;
+  let m = open;
+  while (m < n && s[m] !== '`') m++;
+  if (m >= n) return -1;
+  let close = m;
+  while (close < n && s[close] === '`') close++;
+  return close;
+}
+
+// marked's Be(): true when the label (raw text between `start` and `end`
+// in `text`) contains a '<' that starts an HTML tag or autolink extending
+// past the end of the label. Such a label rejects the link outright
+// (inline, reference, and shortcut alike). A '<' inside a code span does
+// not count, and a tag/autolink fully inside the label is skipped.
+function labelHasRunawayTag(text, start, end) {
+  const label = text.slice(start, end);
+  if (!label.includes('<')) return false;
+  for (let s = 0; s < label.length; s++) {
+    if (label[s] === '\\') { s++; continue; }
+    if (label[s] === '`') {
+      const close = matchLabelCodeSpan(label, s);
+      if (close >= 0) { s = close - 1; continue; }
+    }
+    if (label[s] !== '<') continue;
+    const pos = start + s;
+    const tag = tryHtmlTag(text, pos);
+    const auto = tag ? null : tryBracketAutolink(text, pos);
+    const len = tag ? tag.next - pos : auto ? auto.next - pos : 0;
+    if (len > 0) {
+      if (len > end - pos) return true;
+      s += len - 1;
+    }
+  }
+  return false;
+}
+
+// Would a link form at the ']' at position `j`? Mirrors
+// tryCloseBracketOpener's decision without mutating anything: the nearest
+// active opener, bracket balance, a valid label, and a resolvable
+// destination/reference. Used to stop a code span from swallowing the
+// ']' (the link regex consumes the backticks as a label chunk first).
+function wouldFormLink(text, j, delims, refs) {
+  let opener = null;
+  for (let d = delims.length - 1; d >= 0; d--) {
+    if (delims[d].link && delims[d].active) { opener = delims[d]; break; }
+  }
+  if (!opener) return false;
+  // bracket balance in the raw text between the opener and this ']'
+  let open = 0, close = 0;
+  for (let k = opener.pos + 1; k < j; k++) {
+    if (text[k] === '[') {
+      let bs = 0;
+      for (let b = k - 1; b >= 0 && text[b] === '\\'; b--) bs++;
+      if (bs % 2 === 0) open++;
+    } else if (text[k] === ']') {
+      let bs = 0;
+      for (let b = k - 1; b >= 0 && text[b] === '\\'; b--) bs++;
+      if (bs % 2 === 0) close++;
+    }
+  }
+  if (open !== close) return false;
+  const rawLabel = text.slice(opener.pos + 1, j);
+  if (labelHasRunawayTag(text, opener.pos + 1, j)) return false;
+  if (text[j + 1] === '(') {
+    if (!validLabel(rawLabel)) {
+      // an inline link with an invalid label falls back to a shortcut
+      return refs.has(normLabel(rawLabel));
+    }
+    if (parseInlineLink(text, j + 1)) return true;
+    return refs.has(normLabel(rawLabel));
+  }
+  if (text[j + 1] === '[') {
+    if (!validLabel(rawLabel)) return false;
+    const lab = parseLabel(text, j + 1);
+    if (!lab) return false;
+    const key = normLabel(lab.label === '' ? rawLabel : lab.label);
+    return refs.has(key);
+  }
+  // shortcut reference (no label-pattern check: backticks are free here)
+  return refs.has(normLabel(rawLabel));
 }
 
 // Attempt to form a link/image at the ']' at position `i`.
@@ -644,33 +875,40 @@ function tryCloseBracket(text, i, nodes, delims, refs) {
 
 // Resolve a ']' against one specific opener: inline link, full/collapsed
 // reference, or shortcut reference. Returns the formed node or null.
+// A label holding a '<' that starts a tag/autolink running past the ']'
+// rejects the link outright (marked's Be). An inline link or a full /
+// collapsed reference also needs its label to match the label pattern
+// (validLabel); a shortcut reference does not.
 function tryCloseBracketOpener(text, i, nodes, delims, opener, refs) {
   const ni = nodes.indexOf(opener);
+  const rawLabel = text.slice(opener.pos + 1, i);
+  if (labelHasRunawayTag(text, opener.pos + 1, i)) return null;
   let dest = null, title = null, next = i + 1;
   if (text[i + 1] === '(') {
     const res = parseInlineLink(text, i + 1);
-    if (res) {
+    if (res && validLabel(rawLabel)) {
       dest = res.dest; title = res.title; next = res.next;
     } else {
       // an inline link that fails falls back to a shortcut reference
-      const key = normLabel(text.slice(opener.pos + 1, i));
+      const key = normLabel(rawLabel);
       const ref = refs.get(key);
       if (!ref) return null;
       dest = ref.href; title = ref.title;
     }
   } else if (text[i + 1] === '[') {
+    if (!validLabel(rawLabel)) return null;
     const lab = parseLabel(text, i + 1);
     if (!lab) return null;
     const label = lab.label === '' ? null : lab.label;
     // a collapsed reference [] uses the link text as its label — the RAW
     // source text (backslashes kept), not the resolved inline text
-    const key = normLabel(label === null ? text.slice(opener.pos + 1, i) : label);
+    const key = normLabel(label === null ? rawLabel : label);
     const ref = refs.get(key);
     if (!ref) return null;
     dest = ref.href; title = ref.title; next = lab.next;
   } else {
     // a shortcut reference uses the RAW link text as its label
-    const key = normLabel(text.slice(opener.pos + 1, i));
+    const key = normLabel(rawLabel);
     const ref = refs.get(key);
     if (!ref) return null;
     dest = ref.href; title = ref.title;
@@ -725,6 +963,7 @@ function nodesTextOf(children) {
     if (typeof nd === 'string') s += nd;
     else if (nd.k === 0 || nd.k === 1) s += nd.s;
     else if (nd.k === 8) s += nd.raw !== undefined ? nd.raw : nd.s;
+    else if (nd.k === 9) s += nd.s;
     else if (nd.k === 'd') s += nd.s;
     else if (nd.k === 3 || nd.k === 4 || nd.k === 5 || nd.k === 6) s += nodesTextOf(nd.c);
     else if (nd.k === 7) s += nd.alt;
@@ -748,12 +987,12 @@ function tryBracketAutolink(text, i) {
   if (scheme) {
     const href = cleanUrl(content);
     if (href === null) return null;
-    return { node: { k: 6, auto: 'bracket', href: escText(href), title: null, c: [{ k: 8, s: escFull(content), raw: content }] }, next: j + 1 };
+    return { node: { k: 6, auto: 'bracket', href: escFull(href), title: null, c: [{ k: 8, s: escFull(content), raw: content }] }, next: j + 1 };
   }
   // email autolink
   const email = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.exec(content);
   if (email) {
-    return { node: { k: 6, auto: 'bracket', href: 'mailto:' + escText(content), title: null, c: [{ k: 8, s: escFull(content), raw: content }] }, next: j + 1 };
+    return { node: { k: 6, auto: 'bracket', href: 'mailto:' + escFull(content), title: null, c: [{ k: 8, s: escFull(content), raw: content }] }, next: j + 1 };
   }
   return null;
 }
@@ -771,7 +1010,15 @@ const EMAIL_DOMAIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Z
 // left as literal text. xmpp: takes one optional /segment of
 // [A-Za-z0-9@.]+ (gfm-634/635). Returns {node, next} or null.
 // (Manual scanning, no text.slice: this runs at every word start.)
-function matchEmailAt(text, i) {
+// `delims` is the live delimiter stack: marked tokenizes emphasis BEFORE
+// autolinks, so an email inside _..._ / __...__ is matched as if the
+// closing '_' run were not there. When a domain segment (or the email
+// itself) ends in a '_' run and the nearest '_' delimiter is an unmatched
+// opener, that run is treated as the emphasis closer, not as part of the
+// email — but only when the run is right-flanking (followed by the end,
+// whitespace, or punctuation), so a '_' run followed by a word char
+// (which would be an opener, not a closer) still kills the match.
+function matchEmailAt(text, i, delims) {
   const n = text.length;
   let proto = null, j = i;
   if (text.startsWith('mailto:', i)) { proto = 'mailto:'; j = i + 7; }
@@ -788,17 +1035,49 @@ function matchEmailAt(text, i) {
   while (k < n && isDomainChar(text[k])) k++;
   if (k === ds) return null;
   let end = k, hasDot = false;
+  // lazily computed (only when a trailing '_' run is actually met):
+  // is the nearest '_' delimiter an unmatched opener?
+  let usOpener = null;
+  const hasUsOpener = () => {
+    if (usOpener === null) {
+      usOpener = false;
+      if (delims) for (let d = delims.length - 1; d >= 0; d--) {
+        if (delims[d].ch === '_') { usOpener = delims[d].open && delims[d].active; break; }
+      }
+    }
+    return usOpener;
+  };
+  // is the '_' run starting at `p` a plausible emphasis closer? The char
+  // before it is a domain char (alnum), so right-flanking is decided by
+  // the char after the run alone.
+  const usRunIsCloser = (p) => {
+    let q = p;
+    while (q < n && text[q] === '_') q++;
+    const after = q >= n ? '' : text[q];
+    return after === '' || isWhitespace(after) || isUnicodePunct(after);
+  };
   while (k < n && text[k] === '.') {
     let m = k + 1;
     while (m < n && isDomainChar(text[m])) m++;
-    // the segment after the dot must end in an alphanumeric
+    // the segment after the dot must end in an alphanumeric — unless it
+    // ends in a '_' run that closes an unmatched '_' opener, in which
+    // case the run belongs to the emphasis, not the domain
+    if (m > k + 1 && !isAlnum(text[m - 1])) {
+      let t = m;
+      while (t > k + 1 && text[t - 1] === '_') t--;
+      if (t > k + 1 && isAlnum(text[t - 1]) && hasUsOpener() && usRunIsCloser(t)) m = t;
+      else break;
+    }
     if (m === k + 1 || !isAlnum(text[m - 1])) break;
     end = m; k = m; hasDot = true;
   }
   if (!hasDot) return null;
   const domain = text.slice(ds, end);
   const after = text[end];
-  if (after !== undefined && (isAlnum(after) || after === '_' || after === '-')) return null;
+  // the (?![\w-]) lookahead: a trailing alnum or '-' kills the match; a
+  // trailing '_' kills it too — unless that '_' run closes an unmatched
+  // '_' opener (the email sits inside emphasis)
+  if (after !== undefined && (isAlnum(after) || after === '-' || (after === '_' && !(hasUsOpener() && usRunIsCloser(end))))) return null;
   const email = local + '@' + domain;
   let full = (proto || '') + email;
   let next = end;
@@ -821,8 +1100,58 @@ function isAlnum(c) {
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
 }
 
+// GFM extended-autolink backpedal, as a hand-written chunk scanner.
+// A URL candidate is trimmed to the longest prefix covered by these
+// chunks, and the scan repeats until the result is stable:
+//   A: a run of chars outside ?!.,:;*_'\"~()&
+//   B: a (...) group with no ')' inside it
+//   C: an '&' that does NOT start a character reference running to the
+//      end of the string ([A-Za-z0-9]+; at the end)
+//   D: a run of ?!.,:;*_'\"~) that does NOT reach the end of the string
+// (A paren group whose ')' is the LAST char is dropped, while a group
+// like (./d) after a stray ')' is kept whole.)
+const BACKPEDAL_A_STOP = "?!.,:;*_'\"~()&";
+const BACKPEDAL_D_SET = "?!.,:;*_'\"~)";
+
+function backpedalUrl(s) {
+  for (;;) {
+    let m = 0;
+    const n = s.length;
+    while (m < n) {
+      const c = s[m];
+      if (!BACKPEDAL_A_STOP.includes(c)) {
+        while (m < n && !BACKPEDAL_A_STOP.includes(s[m])) m++;
+      } else if (c === '(') {
+        let k = m + 1;
+        while (k < n && s[k] !== ')') k++;
+        if (k < n) m = k + 1;
+        else break;
+      } else if (c === '&') {
+        let k = m + 1;
+        while (k < n && isAlnum(s[k])) k++;
+        if (k > m + 1 && k < n && s[k] === ';' && k + 1 === n) break;
+        m++;
+      } else if (BACKPEDAL_D_SET.includes(c)) {
+        let k = m;
+        while (k < n && BACKPEDAL_D_SET.includes(s[k])) k++;
+        if (k < n) m = k;
+        else break;
+      } else break;
+    }
+    if (m === n) return s;
+    s = s.slice(0, m);
+    if (s === '') return '';
+  }
+}
+
 // Extended www./scheme:// autolink at position `i`. Returns {node, next} or null.
-function matchExtendedAutolink(text, i, kind) {
+// `delims` is the live delimiter stack: a link that starts before the
+// autolink has priority over it (marked tries the link tokenizer at the
+// '[' first), so the maximal run stops at a ']' that would close an
+// active link opener — one followed by '(' (inline link), '[' (full or
+// collapsed reference), or only whitespace to the end of the text
+// (shortcut reference at the end of the paragraph).
+function matchExtendedAutolink(text, i, kind, delims) {
   const n = text.length;
   let prefix = '';
   if (kind === 'www') {
@@ -834,47 +1163,36 @@ function matchExtendedAutolink(text, i, kind) {
       prefix = '';
     } else return null;
   }
-  // maximal run of non-space, non-'<>' chars
+  // maximal run of non-space, non-'<' chars ('>' is part of the URL:
+  // marked's url regex only stops at whitespace and '<')
   let j = i;
-  while (j < n && text[j] !== ' ' && text[j] !== '\t' && text[j] !== '\n' && text[j] !== '<' && text[j] !== '>') j++;
-  let match = text.slice(i, j);
-  // trims, looped until stable
-  for (;;) {
-    const before = match;
-    // (a) trailing ';' forming a named entity: cut before the '&'
-    if (match.endsWith(';')) {
-      const amp = match.lastIndexOf('&');
-      if (amp >= 0 && /^[A-Za-z][A-Za-z0-9]*$/.test(match.slice(amp + 1, match.length - 1))) {
-        match = match.slice(0, amp);
+  while (j < n && text[j] !== ' ' && text[j] !== '\t' && text[j] !== '\n' && text[j] !== '<') {
+    if (text[j] === ']' && delims) {
+      const nx = text[j + 1];
+      if (nx === '(' || nx === '[' || nx === undefined || nx === ' ' || nx === '\t' || nx === '\n') {
+        let linkClose = false;
+        if (nx === '(' || nx === '[') {
+          linkClose = delims.some((d) => d.link && d.active);
+        } else {
+          // only whitespace to the end of the text
+          let k = j + 1;
+          while (k < n && (text[k] === ' ' || text[k] === '\t' || text[k] === '\n')) k++;
+          linkClose = k >= n && delims.some((d) => d.link && d.active);
+        }
+        if (linkClose) break;
       }
     }
-    // (b) trailing punctuation ?!.,:;*_~'"
-    while (match.length > 0 && '?!.,:;*_~\'"'.includes(match[match.length - 1])) match = match.slice(0, -1);
-    // (c) unbalanced trailing ')'
-    while (match.endsWith(')')) {
-      let open = 0, close = 0;
-      for (const c of match) { if (c === '(') open++; else if (c === ')') close++; }
-      if (close <= open) break;
-      match = match.slice(0, -1);
-    }
-    // (d) truncate before the first unmatched '('
-    {
-      const stack = [];
-      for (let k = 0; k < match.length; k++) {
-        const c = match[k];
-        if (c === '(') stack.push(k);
-        else if (c === ')') { if (stack.length) stack.pop(); }
-      }
-      if (stack.length) match = match.slice(0, stack[0]);
-    }
-    if (match === before) break;
+    j++;
   }
+  let match = backpedalUrl(text.slice(i, j));
   if (match === '') return null;
   // minimal validity: www. needs something after the dot; scheme needs the ://
   if (kind === 'www' && match.length <= 4) return null;
   const href = cleanUrl(prefix + match);
   if (href === null) return null;
-  return { node: { k: 6, auto: 'ext', href: escText(href), title: null, c: [{ k: 8, s: escFull(match), raw: match }] }, next: i + match.length };
+  // the href is fully escaped (an '&amp;' in the URL becomes '&amp;amp;'
+  // in the href); the visible text is escaped the same way
+  return { node: { k: 6, auto: 'ext', href: escFull(href), title: null, c: [{ k: 8, s: escFull(match), raw: match }] }, next: i + match.length };
 }
 
 // Inline HTML tag at position `i` (which is '<'). Returns {text, next} or
@@ -1188,11 +1506,15 @@ function htmlBlockEndMarker(type) {
 
 // Join lines[i..j) as block text; strip one trailing '\n' when the next
 // line (lines[j]) is blank, or when the block runs to the end of an inner
-// (container) range.
-function htmlText(lines, i, j, end, stripAtEnd) {
+// (container) range. For block types 1-5 (pre/script/comment/processing
+// instruction/declaration/CDATA) marked keeps the trailing newline when
+// the following blank line is whitespace-only (only a truly EMPTY blank
+// line strips it); types 6-7 strip on any blank line. `stripWsBlank`
+// selects the types 6-7 behaviour.
+function htmlText(lines, i, j, end, stripAtEnd, stripWsBlank) {
   let s = '';
   for (let k = i; k < j; k++) s += lines[k];
-  if (j < end && isBlank(lines[j]) && s.charCodeAt(s.length - 1) === 10) s = s.slice(0, -1);
+  if (j < end && s.charCodeAt(s.length - 1) === 10 && (stripWsBlank ? isBlank(lines[j]) : lines[j] === '\n' || lines[j] === '')) s = s.slice(0, -1);
   else if (j >= end && stripAtEnd && s.charCodeAt(s.length - 1) === 10) s = s.slice(0, -1);
   return s;
 }
@@ -1223,7 +1545,7 @@ function parseHTML(lines, i, end, type, stripAtEnd) {
   // types 6 and 7: consume until a blank line
   let j = i + 1;
   while (j < end && !isBlank(lines[j])) j++;
-  return { block: { t: 'html', text: htmlText(lines, i, j, end, stripAtEnd) }, next: j };
+  return { block: { t: 'html', text: htmlText(lines, i, j, end, stripAtEnd, true) }, next: j };
 }
 
 /* --- lazy continuation lines (blockquote / list item) --- */
@@ -1972,6 +2294,7 @@ function renderListItem(item, refs, tight) {
 
 export function parse(markdown) {
   inLink = false;
+  inRawBlock = false;
   const src = String(markdown).replace(/\r\n?/g, '\n');
   const lines = splitLines(src);
   const refs = new Map();
