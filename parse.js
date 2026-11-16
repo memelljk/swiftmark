@@ -1596,27 +1596,26 @@ function nodesTextOf(children) {
   return out;
 }
 
-/* ---------------- autolinks ---------------- */
+/* ============ autolinks ============ */
 
-// Bracketed autolink <scheme:...> or <email>; returns {node, next} or null.
+// A bracketed autolink, <scheme:...> or <email>, at the '<' at index i.
+// Returns { node, next } or null. The bracket content runs to the next
+// '>' and may not contain a space, a newline or another '<'.
 function tryBracketAutolink(text, i) {
   const n = text.length;
   let p = i + 1;
-  let inner = '';
-  while (p < n && text[p] !== '>' && text[p] !== ' ' && text[p] !== '\n' && text[p] !== '<') {
-    inner += text[p]; p++;
-  }
+  while (p < n && text[p] !== '>' && text[p] !== ' ' && text[p] !== '\n' && text[p] !== '<') p += 1;
   if (p >= n || text[p] !== '>') return null;
-  // scheme autolink: scheme 2..32 chars, first letter, then : and anything
-  const schemeHit = /^([A-Za-z][A-Za-z0-9+.-]{1,31}):/.exec(inner);
-  if (schemeHit) {
+  const inner = text.slice(i + 1, p);
+  // Scheme form: a scheme of 2..32 characters (letter first, then
+  // letters, digits, '+', '.', '-'), a colon, and anything after it.
+  if (/^[A-Za-z][A-Za-z0-9+.-]{1,31}:/.test(inner)) {
     const href = cleanUrl(inner);
     if (href === null) return null;
     return { node: { k: 6, auto: 'bracket', href: escFull(href), title: null, c: [{ k: 8, s: escFull(inner), raw: inner }] }, next: p + 1 };
   }
-  // email autolink
-  const emailHit = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.exec(inner);
-  if (emailHit) {
+  // Email form: a local part, '@', and a dotted domain.
+  if (/^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/.test(inner)) {
     return { node: { k: 6, auto: 'bracket', href: 'mailto:' + escFull(inner), title: null, c: [{ k: 8, s: escFull(inner), raw: inner }] }, next: p + 1 };
   }
   return null;
@@ -1644,83 +1643,93 @@ const EMAIL_DOMAIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Z
 // closer) still kills the match.
 function matchEmailAt(text, i, delims) {
   const n = text.length;
-  let scheme = null, p = i;
-  if (text.startsWith('mailto:', i)) { scheme = 'mailto:'; p = i + 7; }
-  else if (text.startsWith('xmpp:', i)) { scheme = 'xmpp:'; p = i + 5; }
-  // local part: [A-Za-z0-9._+-]+
-  const localStart = p;
-  while (p < n && isEmailLocal(text[p])) p++;
-  if (p === localStart) return null;
-  const local = text.slice(localStart, p);
-  if (text[p] !== '@') return null;
-  // domain: [a-zA-Z0-9-_]+ (?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+
-  let q = p + 1;
-  const domainStart = q;
-  while (q < n && isDomainChar(text[q])) q++;
-  if (q === domainStart) return null;
-  let domainEnd = q, hasDot = false;
-  // lazily computed (only when a trailing '_' run is actually met):
-  // is the nearest '_' delimiter an unmatched opener?
-  let usOpen = null;
+  let proto = null;
+  let pos = i;
+  if (text.startsWith('mailto:', i)) { proto = 'mailto:'; pos = i + 7; }
+  else if (text.startsWith('xmpp:', i)) { proto = 'xmpp:'; pos = i + 5; }
+  // Local part: [A-Za-z0-9._+-]+
+  const localFrom = pos;
+  while (pos < n && isEmailLocal(text[pos])) pos += 1;
+  if (pos === localFrom) return null;
+  const local = text.slice(localFrom, pos);
+  if (text[pos] !== '@') return null;
+  // Domain: [A-Za-z0-9-_]+ followed by one or more dot segments, each
+  // ending in an alphanumeric: (?:\.[A-Za-z0-9-_]*[A-Za-z0-9])+
+  let domPos = pos + 1;
+  const domainFrom = domPos;
+  while (domPos < n && isDomainChar(text[domPos])) domPos += 1;
+  if (domPos === domainFrom) return null;
+  let domainEnd = domPos;
+  let hasDot = false;
+  // Computed lazily, only when a trailing '_' run is actually met: is
+  // the nearest '_' delimiter on the stack an unmatched opener?
+  let usOpenCache = null;
   const nearestUsOpener = () => {
-    if (usOpen === null) {
-      usOpen = false;
-      if (delims) for (let d = delims.length - 1; d >= 0; d--) {
-        if (delims[d].ch === '_') { usOpen = delims[d].open && delims[d].active; break; }
+    if (usOpenCache === null) {
+      usOpenCache = false;
+      if (delims) {
+        for (let d = delims.length - 1; d >= 0; d--) {
+          if (delims[d].ch === '_') { usOpenCache = delims[d].open && delims[d].active; break; }
+        }
       }
     }
-    return usOpen;
+    return usOpenCache;
   };
-  // is the '_' run starting at `p` a plausible emphasis closer? The char
-  // before it is a domain char (alnum), so right-flanking is decided by
-  // the char after the run alone.
-  const usRunCloses = (p) => {
-    let q = p;
-    while (q < n && text[q] === '_') q++;
+  // Could the '_' run starting at `at` act as an emphasis closer? The
+  // character before it is a domain character (alphanumeric), so its
+  // right-flanking is decided by the character after the run alone.
+  const usRunCloses = (at) => {
+    let q = at;
+    while (q < n && text[q] === '_') q += 1;
     const after = q >= n ? '' : text[q];
     return after === '' || isWhitespace(after) || isUnicodePunct(after);
   };
-  while (q < n && text[q] === '.') {
-    let r = q + 1;
-    while (r < n && isDomainChar(text[r])) r++;
-    // the segment after the dot must end in an alphanumeric — unless it
+  while (domPos < n && text[domPos] === '.') {
+    let segEnd = domPos + 1;
+    while (segEnd < n && isDomainChar(text[segEnd])) segEnd += 1;
+    // The segment after the dot must end in an alphanumeric — unless it
     // ends in a '_' run that closes an unmatched '_' opener, in which
-    // case the run belongs to the emphasis, not the domain
-    if (r > q + 1 && !isAlnum(text[r - 1])) {
-      let back = r;
-      while (back > q + 1 && text[back - 1] === '_') back--;
-      if (back > q + 1 && isAlnum(text[back - 1]) && nearestUsOpener() && usRunCloses(back)) r = back;
+    // case the run belongs to the emphasis, not to the domain.
+    if (segEnd > domPos + 1 && !isAlnum(text[segEnd - 1])) {
+      let back = segEnd;
+      while (back > domPos + 1 && text[back - 1] === '_') back -= 1;
+      if (back > domPos + 1 && isAlnum(text[back - 1]) && nearestUsOpener() && usRunCloses(back)) segEnd = back;
       else break;
     }
-    if (r === q + 1 || !isAlnum(text[r - 1])) break;
-    domainEnd = r; q = r; hasDot = true;
+    if (segEnd === domPos + 1 || !isAlnum(text[segEnd - 1])) break;
+    domainEnd = segEnd;
+    domPos = segEnd;
+    hasDot = true;
   }
   if (!hasDot) return null;
-  const domain = text.slice(domainStart, domainEnd);
-  const nextCh = text[domainEnd];
-  // the (?![\w-]) lookahead: a trailing alnum or '-' kills the match; a
-  // trailing '_' kills it too — unless that '_' run closes an unmatched
-  // '_' opener (the email sits inside emphasis)
-  if (nextCh !== undefined && (isAlnum(nextCh) || nextCh === '-' || (nextCh === '_' && !(nearestUsOpener() && usRunCloses(domainEnd))))) return null;
+  const domain = text.slice(domainFrom, domainEnd);
+  const follower = text[domainEnd];
+  // The (?![\w-]) lookahead: a trailing alphanumeric or '-' kills the
+  // match; a trailing '_' kills it too — unless that '_' run closes an
+  // unmatched '_' opener (the email sits inside emphasis).
+  if (follower !== undefined && (isAlnum(follower) || follower === '-' ||
+      (follower === '_' && !(nearestUsOpener() && usRunCloses(domainEnd))))) return null;
   const email = local + '@' + domain;
-  let full = (scheme || '') + email;
+  let full = (proto || '') + email;
   let next = domainEnd;
-  if (scheme === 'xmpp:' && text[next] === '/') {
+  if (proto === 'xmpp:' && text[next] === '/') {
     let r = next + 1;
-    while (r < n && (isAlnum(text[r]) || text[r] === '@' || text[r] === '.')) r++;
+    while (r < n && (isAlnum(text[r]) || text[r] === '@' || text[r] === '.')) r += 1;
     if (r > next + 1) { full += text.slice(next, r); next = r; }
   }
-  const href = scheme === 'xmpp:' ? escText(full) : 'mailto:' + escText(email);
+  const href = proto === 'xmpp:' ? escText(full) : 'mailto:' + escText(email);
   return { node: { k: 6, auto: 'ext', href, title: null, c: [{ k: 8, s: escFull(full), raw: full }] }, next };
 }
 
+// Single-character tests on string characters (the email matcher works
+// on characters, not codes).
 function isEmailLocal(c) {
-  return c === '.' || c === '_' || c === '+' || c === '-' ||
-    (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+  return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+    c === '.' || c === '_' || c === '+' || c === '-';
 }
 function isDomainChar(c) {
-  return c === '-' || c === '_' ||
-    (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+  return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+    c === '-' || c === '_';
 }
 function isAlnum(c) {
   return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
@@ -1739,33 +1748,47 @@ function isAlnum(c) {
 const BACKPEDAL_A_STOP = "?!.,:;*_'\"~()&";
 const BACKPEDAL_D_SET = "?!.,:;*_'\"~)";
 
+// One backpedal pass over `s`: how much of its prefix is covered by the
+// chunk grammar (A/B/C/D above)? Returns that prefix length.
+function backpedalPrefixLen(s) {
+  const n = s.length;
+  let cut = 0;
+  while (cut < n) {
+    const c = s[cut];
+    if (!BACKPEDAL_A_STOP.includes(c)) {
+      // Chunk A: a run of ordinary characters.
+      while (cut < n && !BACKPEDAL_A_STOP.includes(s[cut])) cut += 1;
+    } else if (c === '(') {
+      // Chunk B: a parenthesised group with no ')' inside it.
+      let q = cut + 1;
+      while (q < n && s[q] !== ')') q += 1;
+      if (q < n) cut = q + 1;
+      else break;
+    } else if (c === '&') {
+      // Chunk C covers an '&' that does not start a character reference
+      // running to the very end of the string; such a reference is not
+      // consumable, so the pass stops before the '&'.
+      let q = cut + 1;
+      while (q < n && isAlnum(s[q])) q += 1;
+      if (q > cut + 1 && q < n && s[q] === ';' && q + 1 === n) break;
+      cut += 1;
+    } else if (BACKPEDAL_D_SET.includes(c)) {
+      // Chunk D: a run of trailing-punctuation characters that does
+      // not reach the end of the string.
+      let q = cut;
+      while (q < n && BACKPEDAL_D_SET.includes(s[q])) q += 1;
+      if (q < n) cut = q;
+      else break;
+    } else break;
+  }
+  return cut;
+}
+
 function backpedalUrl(s) {
   for (;;) {
-    let cut = 0;
-    const n = s.length;
-    while (cut < n) {
-      const c = s[cut];
-      if (!BACKPEDAL_A_STOP.includes(c)) {
-        while (cut < n && !BACKPEDAL_A_STOP.includes(s[cut])) cut++;
-      } else if (c === '(') {
-        let q = cut + 1;
-        while (q < n && s[q] !== ')') q++;
-        if (q < n) cut = q + 1;
-        else break;
-      } else if (c === '&') {
-        let q = cut + 1;
-        while (q < n && isAlnum(s[q])) q++;
-        if (q > cut + 1 && q < n && s[q] === ';' && q + 1 === n) break;
-        cut++;
-      } else if (BACKPEDAL_D_SET.includes(c)) {
-        let q = cut;
-        while (q < n && BACKPEDAL_D_SET.includes(s[q])) q++;
-        if (q < n) cut = q;
-        else break;
-      } else break;
-    }
-    if (cut === n) return s;
-    s = s.slice(0, cut);
+    const keep = backpedalPrefixLen(s);
+    if (keep === s.length) return s;
+    s = s.slice(0, keep);
     if (s === '') return '';
   }
 }
@@ -1779,45 +1802,44 @@ function backpedalUrl(s) {
 // (shortcut reference at the end of the paragraph).
 function matchExtendedAutolink(text, i, kind, delims) {
   const n = text.length;
-  let prefix = '';
+  let hrefPrefix = '';
   if (kind === 'www') {
     if (!text.startsWith('www.', i)) return null;
-    prefix = 'http://';
+    hrefPrefix = 'http://';
   } else {
-    const low = text.slice(i, i + 9).toLowerCase();
-    if (low.startsWith('http://') || low.startsWith('https://') || low.startsWith('ftp://')) {
-      prefix = '';
-    } else return null;
+    const head = text.slice(i, i + 9).toLowerCase();
+    if (!head.startsWith('http://') && !head.startsWith('https://') && !head.startsWith('ftp://')) return null;
   }
-  // maximal run of non-space, non-'<' chars ('>' is part of the URL:
-  // marked's url regex only stops at whitespace and '<')
+  const anyActiveLink = () => delims !== undefined && delims !== null && delims.some((d) => d.link && d.active);
+  // The maximal run: everything up to whitespace or '<' ('>' belongs to
+  // the URL — marked's url pattern stops only at whitespace and '<').
   let p = i;
   while (p < n && text[p] !== ' ' && text[p] !== '\t' && text[p] !== '\n' && text[p] !== '<') {
     if (text[p] === ']' && delims) {
-      const nextCh = text[p + 1];
-      if (nextCh === '(' || nextCh === '[' || nextCh === undefined || nextCh === ' ' || nextCh === '\t' || nextCh === '\n') {
-        let closesLink = false;
-        if (nextCh === '(' || nextCh === '[') {
-          closesLink = delims.some((d) => d.link && d.active);
+      const follower = text[p + 1];
+      if (follower === '(' || follower === '[' || follower === undefined || follower === ' ' || follower === '\t' || follower === '\n') {
+        let stopsHere = false;
+        if (follower === '(' || follower === '[') {
+          stopsHere = anyActiveLink();
         } else {
-          // only whitespace to the end of the text
+          // Only whitespace between here and the end of the text.
           let q = p + 1;
-          while (q < n && (text[q] === ' ' || text[q] === '\t' || text[q] === '\n')) q++;
-          closesLink = q >= n && delims.some((d) => d.link && d.active);
+          while (q < n && (text[q] === ' ' || text[q] === '\t' || text[q] === '\n')) q += 1;
+          stopsHere = q >= n && anyActiveLink();
         }
-        if (closesLink) break;
+        if (stopsHere) break;
       }
     }
-    p++;
+    p += 1;
   }
-  let url = backpedalUrl(text.slice(i, p));
+  const url = backpedalUrl(text.slice(i, p));
   if (url === '') return null;
-  // minimal validity: www. needs something after the dot; scheme needs the ://
+  // Minimal validity: a www. link needs something after its dot.
   if (kind === 'www' && url.length <= 4) return null;
-  const href = cleanUrl(prefix + url);
+  const href = cleanUrl(hrefPrefix + url);
   if (href === null) return null;
-  // the href is fully escaped (an '&amp;' in the URL becomes '&amp;amp;'
-  // in the href); the visible text is escaped the same way
+  // Both the href and the visible text are fully escaped (so an '&amp;'
+  // inside the URL shows up as '&amp;amp;' in the href).
   return { node: { k: 6, auto: 'ext', href: escFull(href), title: null, c: [{ k: 8, s: escFull(url), raw: url }] }, next: i + url.length };
 }
 
@@ -1832,80 +1854,83 @@ function tryHtmlTag(text, i) {
   const n = text.length;
   if (text[i] !== '<') return null;
   let p = i + 1;
-  const skipWs = (q) => {
-    while (q < n && (text[q] === ' ' || text[q] === '\t' || text[q] === '\n')) q++;
+  const skipTagWs = (q) => {
+    while (q < n && (text[q] === ' ' || text[q] === '\t' || text[q] === '\n')) q += 1;
     return q;
   };
-  // comment: <!--> | <!---> | <!-- ... --> (or to the end of the text)
+  const finishAt = (end) => ({ text: text.slice(i, end), next: end });
+  // Comments: <!--> and <!---> are complete in themselves; a general
+  // <!-- ... --> comment runs to its '-->' or, failing that, to the end
+  // of the text.
   if (text.startsWith('<!--', i)) {
-    if (text.startsWith('<!-->', i)) return { text: text.slice(i, i + 5), next: i + 5 };
-    if (text.startsWith('<!--->', i)) return { text: text.slice(i, i + 6), next: i + 6 };
+    if (text.startsWith('<!-->', i)) return finishAt(i + 5);
+    if (text.startsWith('<!--->', i)) return finishAt(i + 6);
     const closeAt = text.indexOf('-->', i + 4);
-    if (closeAt < 0) return { text: text.slice(i), next: n };
-    return { text: text.slice(i, closeAt + 3), next: closeAt + 3 };
+    return closeAt < 0 ? finishAt(n) : finishAt(closeAt + 3);
   }
-  // processing instruction <? ... ?>
+  // Processing instruction: <? ... ?>
   if (text[p] === '?') {
     const closeAt = text.indexOf('?>', p + 1);
     if (closeAt < 0) return null;
-    return { text: text.slice(i, closeAt + 2), next: closeAt + 2 };
+    return finishAt(closeAt + 2);
   }
-  // declaration <!A-Z ...> or CDATA
+  // Declaration <!A ...> or a CDATA section.
   if (text[p] === '!') {
     if (text.startsWith('<![CDATA[', i)) {
       const closeAt = text.indexOf(']]>', i + 9);
       if (closeAt < 0) return null;
-      return { text: text.slice(i, closeAt + 3), next: closeAt + 3 };
+      return finishAt(closeAt + 3);
     }
     if (p + 1 < n && isLetterCode(text.charCodeAt(p + 1))) {
       const closeAt = text.indexOf('>', p + 1);
       if (closeAt < 0) return null;
-      return { text: text.slice(i, closeAt + 1), next: closeAt + 1 };
+      return finishAt(closeAt + 1);
     }
     return null;
   }
-  // closing tag </name>
-  let isClosing = false;
-  if (text[p] === '/') { isClosing = true; p++; }
+  // An ordinary tag, opening or closing.
+  let closing = false;
+  if (text[p] === '/') { closing = true; p += 1; }
   if (p >= n || !isLetterCode(text.charCodeAt(p))) return null;
-  while (p < n && isTagNameCode(text.charCodeAt(p))) p++;
-  if (isClosing) {
-    p = skipWs(p);
-    if (p < n && text[p] === '>') return { text: text.slice(i, p + 1), next: p + 1 };
+  while (p < n && isTagNameCode(text.charCodeAt(p))) p += 1;
+  if (closing) {
+    p = skipTagWs(p);
+    if (p < n && text[p] === '>') return finishAt(p + 1);
     return null;
   }
-  // open tag: attributes, each preceded by whitespace (newlines allowed)
+  // Opening tag: a sequence of attributes, each preceded by whitespace
+  // (newlines allowed), then '>' or '/>'.
   while (p < n) {
-    if (text[p] === '>') return { text: text.slice(i, p + 1), next: p + 1 };
-    if (text[p] === '/' && text[p + 1] === '>') return { text: text.slice(i, p + 2), next: p + 2 };
+    if (text[p] === '>') return finishAt(p + 1);
+    if (text[p] === '/' && text[p + 1] === '>') return finishAt(p + 2);
     if (text[p] !== ' ' && text[p] !== '\t' && text[p] !== '\n') return null;
-    p = skipWs(p);
+    p = skipTagWs(p);
     if (p >= n) return null;
-    if (text[p] === '>') return { text: text.slice(i, p + 1), next: p + 1 };
-    if (text[p] === '/' && text[p + 1] === '>') return { text: text.slice(i, p + 2), next: p + 2 };
-    // attribute name
+    if (text[p] === '>') return finishAt(p + 1);
+    if (text[p] === '/' && text[p + 1] === '>') return finishAt(p + 2);
+    // Attribute name.
     if (!isAttrNameCode(text.charCodeAt(p))) return null;
-    p++;
-    while (p < n && isAttrNameCode(text.charCodeAt(p))) p++;
-    // optional = value (whitespace allowed around '=')
-    let q = skipWs(p);
+    p += 1;
+    while (p < n && isAttrNameCode(text.charCodeAt(p))) p += 1;
+    // An optional = value, with whitespace allowed around the '='.
+    let q = skipTagWs(p);
     if (text[q] === '=') {
-      q++;
-      q = skipWs(q);
+      q = skipTagWs(q + 1);
       const quote = text[q];
       if (quote === '"' || quote === "'") {
-        q++;
-        while (q < n && text[q] !== quote) q++;
+        q += 1;
+        while (q < n && text[q] !== quote) q += 1;
         if (q >= n) return null;
-        q++;
+        q += 1;
       } else {
-        const valStart = q;
-        while (q < n && isUnquotedAttrCode(text.charCodeAt(q))) q++;
-        if (q === valStart) return null;
+        const valueFrom = q;
+        while (q < n && isUnquotedAttrCode(text.charCodeAt(q))) q += 1;
+        if (q === valueFrom) return null;
       }
       p = q;
     }
-    // else: no value; the separator whitespace is consumed by the loop
+    // Without a value, the separator whitespace the loop head consumed
+    // is simply where the next attribute (or the tag end) begins.
   }
   return null;
 }
