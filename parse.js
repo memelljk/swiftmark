@@ -69,10 +69,42 @@ function normLabel(s) {
 function isAsciiPunct(c) {
   return (c >= 33 && c <= 47) || (c >= 58 && c <= 64) || (c >= 91 && c <= 96) || (c >= 123 && c <= 126);
 }
+// Fast char-code tests (hot in parseInline — a regex per character is
+// measurably slower): email local-part chars [A-Za-z0-9._+-] and
+// alphanumerics [A-Za-z0-9].
+function isEmailLocalCode(c) {
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 46 || c === 95 || c === 43 || c === 45;
+}
+function isAlnumCode(c) {
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+}
+function isLetterCode(c) { // [A-Za-z]
+  return (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+}
+function isTagNameCode(c) { // [A-Za-z0-9-]
+  return isAlnumCode(c) || c === 45;
+}
+function isAttrNameCode(c) { // [\w.:-] = [A-Za-z0-9_.:-]
+  return isAlnumCode(c) || c === 95 || c === 46 || c === 58 || c === 45;
+}
+function isUnquotedAttrCode(c) { // not [ \t\n"'=<>\`]
+  return c !== 32 && c !== 9 && c !== 10 && c !== 34 && c !== 39 && c !== 61 && c !== 60 && c !== 62 && c !== 96;
+}
+// Chars that always need per-character handling in parseInline.
+const INLINE_SPECIAL = new Uint8Array(128);
+for (const c of [92, 96, 60, 38, 42, 95, 126, 91, 93, 33, 10]) INLINE_SPECIAL[c] = 1; // \ ` < & * _ ~ [ ] ! \n
+// Letters that can start an extended autolink (www. / scheme / mailto: / xmpp:).
+function isTriggerLetterCode(c) {
+  return c === 119 || c === 104 || c === 72 || c === 102 || c === 70 || c === 109 || c === 120; // w h H f F m x
+}
 function isSpaceOrTab(c) { return c === ' ' || c === '\t'; }
 function isUnicodePunct(ch) {
   // CommonMark punctuation = ASCII punctuation + Unicode P/S categories.
-  return isAsciiPunct(ch.charCodeAt(0)) || /[\p{P}\p{S}]/u.test(ch);
+  // For ASCII (the overwhelmingly common case) the code check alone
+  // decides — skip the Unicode regex entirely.
+  const c = ch.charCodeAt(0);
+  if (c < 128) return isAsciiPunct(c);
+  return /[\p{P}\p{S}]/u.test(ch);
 }
 function isWhitespace(ch) {
   return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v' || ch === '\u00a0';
@@ -220,6 +252,36 @@ function parseInline(text, refs) {
   }
 
   while (i < n) {
+    // Fast path: accumulate a run of plain text in one slice. The run
+    // stops at any special char, at a trigger letter at a word start
+    // (an autolink could begin there), and at the word start before
+    // an '@' (an email could begin there). Everything inside the run
+    // is ordinary text that needs no per-character dispatch.
+    {
+      const c0 = text.charCodeAt(i);
+      const atWordStart = !(i > 0 && isEmailLocalCode(text.charCodeAt(i - 1)));
+      if (!INLINE_SPECIAL[c0] && !(atWordStart && isEmailLocalCode(c0))) {
+        let j = i + 1;
+        let prevLocal = isEmailLocalCode(c0);
+        while (j < n) {
+          const c = text.charCodeAt(j);
+          if (INLINE_SPECIAL[c]) break;
+          if (c === 64) { // '@': stop at the word start before it
+            let k = j - 1;
+            while (k >= i && isEmailLocalCode(text.charCodeAt(k))) k--;
+            if (k + 1 > i) { j = k + 1; break; }
+            // the word starts at or before i: the email check there
+            // already ran, so this '@' is plain text
+            prevLocal = false; j++; continue;
+          }
+          if (!prevLocal && isTriggerLetterCode(c)) break;
+          prevLocal = isEmailLocalCode(c);
+          j++;
+        }
+        if (j > i) { buf += text.slice(i, j); i = j; }
+        continue;
+      }
+    }
     const ch = text[i];
 
     // --- backslash escapes and backslash-newline hard break ---
@@ -431,15 +493,15 @@ function parseInline(text, refs) {
     // mailto:/xmpp: (lowercase only) at the start or after a non-alphanumeric
     if ((ch === 'm' || ch === 'x') && !inLink && (text.startsWith('mailto:', i) || text.startsWith('xmpp:', i))) {
       const prev = i === 0 ? '' : text[i - 1];
-      if (prev === '' || !/[A-Za-z0-9]/.test(prev)) {
+      if (prev === '' || !isAlnumCode(prev.charCodeAt(0))) {
         const m = matchEmailAt(text, i, delims);
         if (m) { flush(); nodes.push(m.node); i = m.next; continue; }
       }
     }
     // plain email: current char is a local char and the previous one is not
-    if (/[A-Za-z0-9._+-]/.test(ch) && !inLink) {
+    if (!inLink && isEmailLocalCode(ch.charCodeAt(0))) {
       const prev = i === 0 ? '' : text[i - 1];
-      if (prev === '' || !/[A-Za-z0-9._+-]/.test(prev)) {
+      if (prev === '' || !isAlnumCode(prev.charCodeAt(0))) {
         const m = matchEmailAt(text, i, delims);
         if (m) { flush(); nodes.push(m.node); i = m.next; continue; }
       }
@@ -1449,7 +1511,7 @@ function tryHtmlTag(text, i) {
       if (end < 0) return null;
       return { text: text.slice(i, end + 3), next: end + 3 };
     }
-    if (j + 1 < n && /[A-Za-z]/.test(text[j + 1])) {
+    if (j + 1 < n && isLetterCode(text.charCodeAt(j + 1))) {
       const end = text.indexOf('>', j + 1);
       if (end < 0) return null;
       return { text: text.slice(i, end + 1), next: end + 1 };
@@ -1459,8 +1521,8 @@ function tryHtmlTag(text, i) {
   // closing tag </name>
   let closing = false;
   if (text[j] === '/') { closing = true; j++; }
-  if (j >= n || !/[A-Za-z]/.test(text[j])) return null;
-  while (j < n && /[A-Za-z0-9-]/.test(text[j])) j++;
+  if (j >= n || !isLetterCode(text.charCodeAt(j))) return null;
+  while (j < n && isTagNameCode(text.charCodeAt(j))) j++;
   if (closing) {
     while (j < n && (text[j] === ' ' || text[j] === '\t' || text[j] === '\n')) j++;
     if (j < n && text[j] === '>') return { text: text.slice(i, j + 1), next: j + 1 };
@@ -1476,9 +1538,9 @@ function tryHtmlTag(text, i) {
     if (text[j] === '>') return { text: text.slice(i, j + 1), next: j + 1 };
     if (text[j] === '/' && text[j + 1] === '>') return { text: text.slice(i, j + 2), next: j + 2 };
     // attribute name
-    if (!/[A-Za-z_:]/.test(text[j])) return null;
+    if (!isAttrNameCode(text.charCodeAt(j))) return null;
     j++;
-    while (j < n && /[\w.:-]/.test(text[j])) j++;
+    while (j < n && isAttrNameCode(text.charCodeAt(j))) j++;
     // optional = value (whitespace allowed around '=')
     let k = j;
     while (k < n && (text[k] === ' ' || text[k] === '\t' || text[k] === '\n')) k++;
@@ -1493,7 +1555,7 @@ function tryHtmlTag(text, i) {
         k++;
       } else {
         const start = k;
-        while (k < n && !/[ \t\n"'=<>\`]/.test(text[k])) k++;
+        while (k < n && isUnquotedAttrCode(text.charCodeAt(k))) k++;
         if (k === start) return null;
       }
       j = k;
