@@ -1625,16 +1625,26 @@ function matchFencedClose(b, ch, minLen) {
   return j === b.length;
 }
 
+// Strip up to n leading whitespace characters from a fenced code
+// content line. Marked's Dt is character-based, so a leading tab counts
+// as one character and is removed whole (not expanded to 4 columns).
+function stripFenceIndent(b, n) {
+  if (n <= 0) return b;
+  let i = 0;
+  while (i < b.length && i < n && (b[i] === ' ' || b[i] === '\t')) i++;
+  return b.slice(i);
+}
+
 function parseFenced(lines, i, end, fen) {
   const content = [];
   let j = i + 1, closed = false;
   while (j < end) {
     const b = body(lines[j]);
     if (matchFencedClose(b, fen.ch, fen.len)) { closed = true; break; }
-    // stripCols handles a partially-stripped tab by turning its
-    // remainder into spaces (a tab at column 0 with fence indent 1
-    // becomes 3 spaces; with indent 0 it stays a tab)
-    content.push(stripCols(b, fen.indent) + (hasNL(lines[j]) ? '\n' : ''));
+    // marked's Dt only compensates the opening fence's indent for
+    // backtick fences (its regex looks for ```); a tilde fence keeps
+    // its content indentation verbatim
+    content.push((fen.ch === '`' ? stripFenceIndent(b, fen.indent) : b) + (hasNL(lines[j]) ? '\n' : ''));
     j++;
   }
   const info = fen.info.trim();
@@ -2012,6 +2022,25 @@ function openFenceIn(itemLines) {
   return fence;
 }
 
+// Whether an under-indented line is fence content inside a list item.
+// Mirrors marked's list tokenizer: the line must not itself start a
+// block that interrupts the item (fence, ATX heading, HTML block,
+// blockquote, list marker, thematic break); the previous item line must
+// not be blank (a blank line ends the fence's capture); and the previous
+// item line's stripped content must not start a fence/heading/html/hr
+// (so a column-0 line right after the opening fence is NOT captured —
+// the fence only begins once an indented content line precedes it).
+function fenceContentLine(line, itemLines) {
+  const lb = body(line);
+  if (matchFencedStart(lb) || matchATX(lb) || htmlBlockType(lb, false) > 0 ||
+      stripQuote(line) !== null || matchListStart(lb) || isThematicBreak(lb)) return false;
+  const prev = itemLines[itemLines.length - 1];
+  if (prev === undefined || isBlank(prev)) return false;
+  const m = body(prev).trimStart();
+  if (matchFencedStart(m) || matchATX(m) || htmlBlockType(m, false) > 0 || isThematicBreak(m)) return false;
+  return true;
+}
+
 function parseList(lines, i, end, refs) {
   const first = matchListStart(body(lines[i]));
   const ordered = first.ordered;
@@ -2080,9 +2109,11 @@ function parseList(lines, i, end, refs) {
         res = null;
         continue;
       }
-      // a line with less indent than the content indent still belongs
-      // to the item when it is inside an open fenced code block
-      if (openFenceIn(itemLines)) {
+      // an under-indented line still belongs to the item when it is
+      // fence content (see fenceContentLine): the fence has already
+      // begun with an indented content line, the line does not start a
+      // new block, and the previous line was not blank
+      if (openFenceIn(itemLines) && fenceContentLine(line, itemLines)) {
         itemLines.push(line);
         j++;
         res = null;
