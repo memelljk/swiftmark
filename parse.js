@@ -337,7 +337,7 @@ function parseInline(text, refs) {
         open = leftFlank; close = rightFlank;
       }
       flush();
-      const d = { k: 'd', s: ch.repeat(run), ch, n: run, open, close, active: true, link: false, image: false };
+      const d = { k: 'd', s: ch.repeat(run), ch, n: run, open, close, active: true, link: false, image: false, pos: i };
       nodes.push(d); delims.push(d);
       i += run;
       continue;
@@ -358,6 +358,26 @@ function parseInline(text, refs) {
       flush();
       const made = tryCloseBracket(text, i, nodes, delims, refs);
       if (made) { i = made.next; continue; }
+      // No link formed: when the '[label](dest)' still matches marked's
+      // blockSkip `link` pattern (label valid per the Ot-masked grammar,
+      // balanced-paren destination), the label's delimiters are invisible
+      // to the outer emphasis scan — mask them so processEmphasis never
+      // pairs them. (A label whose code span holds a backtick fails
+      // validLabel, so the link does not form, yet the mask still hides
+      // the label: doc-16/doc-20 `[at _node `` a ` b ``_](...)`.)
+      if (text[i + 1] === '(' && blockSkipDestEnd(text, i + 1) >= 0) {
+        for (let d = delims.length - 1; d >= 0; d--) {
+          if (!delims[d].link || !delims[d].active) continue;
+          const opener = delims[d];
+          const rawLabel = text.slice(opener.pos + 1, i);
+          if (!blockSkipLabelOk(rawLabel)) break;
+          const oiStack = delims.indexOf(opener);
+          for (let m = oiStack + 1; m < delims.length; m++) {
+            if (!delims[m].link) delims[m].masked = true;
+          }
+          break;
+        }
+      }
       // literal ']': deactivate the nearest active LINK opener (an image
       // opener stays active so an outer image can still form at a later
       // ']' — cm-520; a dead link opener must not keep suppressing the
@@ -428,6 +448,25 @@ function parseInline(text, refs) {
     buf += ch; i++;
   }
   flush();
+  // Delimiters inside a blockSkip-masked range are invisible to the outer
+  // emphasis scan (marked's emStrong mask): the Ot mask pairs a backtick
+  // run with a later same-length run and neutralises the backticks
+  // between them, then blockSkip swallows the whole span — so a stray
+  // backtick in a link label can hide emphasis far past the link
+  // (doc-09/doc-28/doc-35). Delimiters consumed by a link that formed
+  // are already gone from the stack, so only unformed labels and stray
+  // spans are hit here.
+  if (delims.length > 0) {
+    const ranges = blockSkipRanges(text);
+    if (ranges.length > 0) {
+      let ri = 0;
+      for (const d of delims) {
+        if (d.link || d.masked) continue;
+        while (ri < ranges.length && ranges[ri][1] <= d.pos) ri++;
+        if (ri < ranges.length && d.pos >= ranges[ri][0] && d.pos < ranges[ri][1]) d.masked = true;
+      }
+    }
+  }
   processEmphasis(nodes, delims, 0);
   return renderNodes(nodes);
 }
@@ -476,11 +515,12 @@ function processEmphasis(nodes, delims, fromStack) {
   let ci = fromStack;
   while (ci < delims.length) {
     const closer = delims[ci];
-    if (!closer.active || closer.ch === '[' || !closer.close) { ci++; continue; }
+    if (!closer.active || closer.masked || closer.ch === '[' || !closer.close) { ci++; continue; }
     // nearest preceding opener of the same char that can open
     let oi = ci - 1, opener = null;
     while (oi >= fromStack) {
       const d = delims[oi];
+      if (d.masked) { oi--; continue; }
       if (d.ch === closer.ch && d.open && d.active) {
         // strikethrough openers and closers must have EQUAL lengths
         if (closer.ch === '~' && d.n !== closer.n) { oi--; continue; }
@@ -754,6 +794,188 @@ function matchLabelCodeSpan(s, pos) {
   let close = m;
   while (close < n && s[close] === '`') close++;
   return close;
+}
+
+// Ot code span (marked's anyPunctuationOutsideCode code-span alternative):
+// an opening backtick run, content that starts and ends with a non-backtick
+// character (it may hold shorter backtick runs inside — those are what the
+// Ot mask replaces with '+'), and a closing run of the same length not
+// followed by another backtick. Returns the index after the closing run,
+// or -1. This is the code-span grammar the blockSkip mask sees, after the
+// Ot mask has neutralised the inner backticks.
+function matchOtCodeSpan(s, pos) {
+  const n = s.length;
+  let open = pos;
+  while (open < n && s[open] === '`') open++;
+  const L = open - pos;
+  if (L === 0 || open >= n || s[open] === '`') return -1;
+  let k = open;
+  while (k < n) {
+    if (s[k] !== '`') { k++; continue; }
+    let r = k;
+    while (r < n && s[r] === '`') r++;
+    if (r - k === L) return r;
+    k = r;
+  }
+  return -1;
+}
+
+// True when a label matches marked's blockSkip `link` label grammar (the
+// grammar the emStrong mask sees, on the Ot-masked text): no '[' or ']'
+// inside (the class is [^\[\]] — a nested bracket rejects the whole
+// match), escaped characters, and code spans per matchOtCodeSpan. A label
+// that passes here but fails validLabel (its code span holds a backtick)
+// still masks the emphasis inside it — the link does not form, yet the
+// outer emStrong scan never sees the label's delimiters.
+function blockSkipLabelOk(raw) {
+  const n = raw.length;
+  let pos = 0;
+  while (pos < n) {
+    const c = raw[pos];
+    if (c === '[' || c === ']') return false;
+    if (c === '\\') { if (pos + 1 >= n) return false; pos += 2; continue; }
+    if (c === '`') {
+      const end = matchOtCodeSpan(raw, pos);
+      if (end < 0) return false;
+      pos = end;
+      continue;
+    }
+    pos++;
+  }
+  return true;
+}
+
+// Balanced-paren destination after ']( ' (marked's blockSkip `link` dest:
+// one nesting level). text[p] must be '('. Returns the index after the
+// closing ')' or -1.
+function blockSkipDestEnd(text, p) {
+  const n = text.length;
+  let k = p + 1, depth = 0;
+  while (k < n) {
+    const c = text[k];
+    if (c === '\\') { k += 2; continue; }
+    if (c === '(') { if (depth > 0) return -1; depth++; k++; continue; }
+    if (c === ')') {
+      if (depth === 0) return k + 1;
+      depth--; k++; continue;
+    }
+    k++;
+  }
+  return -1;
+}
+
+// The Ot mask (marked's anyPunctuationOutsideCode), length-preserving:
+// a code span keeps its delimiter backticks but has the backticks inside
+// its content replaced with '+'; a backslash-escaped punctuation character
+// is replaced with '++'. Positions in the result match the original text,
+// so the blockSkip scan below can run on it directly.
+function otMaskedText(text) {
+  const chars = text.split('');
+  const n = chars.length;
+  let i = 0;
+  while (i < n) {
+    if (text[i] === '\\' && i + 1 < n && isAsciiPunct(text.charCodeAt(i + 1))) {
+      chars[i] = '+'; chars[i + 1] = '+'; i += 2; continue;
+    }
+    if (text[i] === '`') {
+      const end = matchOtCodeSpan(text, i);
+      if (end >= 0) {
+        let open = i;
+        while (open < n && text[open] === '`') open++;
+        const L = open - i;
+        for (let k = open; k < end - L; k++) if (chars[k] === '`') chars[k] = '+';
+        i = end; continue;
+      }
+      let j = i;
+      while (j < n && text[j] === '`') j++;
+      i = j; continue;
+    }
+    i++;
+  }
+  return chars.join('');
+}
+
+// A blockSkip code-span chunk on the masked text: a maximal backtick run,
+// non-backtick content, and a closing run of the same length (not followed
+// by another backtick — the run is maximal, so that is automatic).
+// Returns the index after the closing run, or -1.
+function matchBlockSkipCodeSpan(s, pos) {
+  const n = s.length;
+  let open = pos;
+  while (open < n && s[open] === '`') open++;
+  const L = open - pos;
+  if (L === 0) return -1;
+  let k = open;
+  while (k < n && s[k] !== '`') k++;
+  if (k === open || k >= n) return -1;
+  let r = k;
+  while (r < n && s[r] === '`') r++;
+  if (r - k !== L) return -1;
+  return r;
+}
+
+// A blockSkip `link` match starting at `pos` (s[pos] === '[') on the
+// masked text: '[' + label + '](' + dest + ')'. The label holds no '['
+// or ']' (the class is [^\[\]]) — a ']' that is not followed by '(' and
+// a valid destination rejects the whole match. Returns the index after
+// the closing ')' or -1.
+function matchBlockSkipLink(s, pos) {
+  const n = s.length;
+  let k = pos + 1;
+  while (k < n) {
+    if (s[k] === '\\') { k += 2; continue; }
+    if (s[k] === '`') {
+      const end = matchBlockSkipCodeSpan(s, k);
+      if (end < 0) return -1;
+      k = end; continue;
+    }
+    if (s[k] === '[' || s[k] === ']') {
+      if (s[k] === ']' && s[k + 1] === '(') {
+        const destEnd = blockSkipDestEnd(s, k + 1);
+        if (destEnd >= 0) return destEnd;
+      }
+      return -1;
+    }
+    k++;
+  }
+  return -1;
+}
+
+// Ranges of the text that marked's emStrong mask replaces (blockSkip:
+// `[label](dest)` links, code spans, HTML tags) — computed on the
+// Ot-masked text, so the ranges are positions in the original text.
+// Delimiters inside these ranges are invisible to the outer emphasis
+// scan (they are re-lexed only inside a link that actually forms).
+function blockSkipRanges(text) {
+  const s = otMaskedText(text);
+  const n = s.length;
+  const ranges = [];
+  let i = 0;
+  while (i < n) {
+    const c = s[i];
+    if (c === '[') {
+      const end = matchBlockSkipLink(s, i);
+      if (end >= 0) { ranges.push([i, end]); i = end; continue; }
+      i++; continue;
+    }
+    if (c === '`') {
+      if (i > 0 && s[i - 1] === '`') { i++; continue; }
+      const end = matchBlockSkipCodeSpan(s, i);
+      if (end >= 0) { ranges.push([i, end]); i = end; continue; }
+      i++; continue;
+    }
+    if (c === '<') {
+      if (s[i + 1] !== ' ') {
+        let k = i + 1;
+        while (k < n && s[k] !== '>' && s[k] !== '<') k++;
+        if (k < n && s[k] === '>') { ranges.push([i, k + 1]); i = k + 1; continue; }
+      }
+      i++; continue;
+    }
+    if (c === '\\') { i += 2; continue; }
+    i++;
+  }
+  return ranges;
 }
 
 // marked's Be(): true when the label (raw text between `start` and `end`
