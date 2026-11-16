@@ -815,104 +815,104 @@ function processEmphasis(nodes, delims, fromStack, text) {
 
 /* ---------------- link resolution ---------------- */
 
-// Parse an inline link destination + optional title starting at `i`
+// Read an inline link destination plus an optional title starting at `i`
 // (which must be '('). Returns {dest, title, next} or null.
 function parseInlineLink(text, i) {
   const n = text.length;
   if (text[i] !== '(') return null;
-  let j = i + 1;
-  while (j < n && (text[j] === ' ' || text[j] === '\t' || text[j] === '\n')) j++;
-  if (j >= n) return null;
+  const skipWs = (p) => {
+    while (p < n && (text[p] === ' ' || text[p] === '\t' || text[p] === '\n')) p++;
+    return p;
+  };
+  let p = skipWs(i + 1);
+  if (p >= n) return null;
   let dest = '';
-  if (text[j] === '<') {
-    let k = j + 1;
-    while (k < n && text[k] !== '\n' && text[k] !== '>') {
-      if (text[k] === '\\' && k + 1 < n && isAsciiPunct(text.charCodeAt(k + 1))) { dest += text[k + 1]; k += 2; }
-      else { dest += text[k]; k++; }
+  if (text[p] === '<') {
+    let q = p + 1;
+    while (q < n && text[q] !== '\n' && text[q] !== '>') {
+      if (text[q] === '\\' && q + 1 < n && isAsciiPunct(text.charCodeAt(q + 1))) { dest += text[q + 1]; q += 2; }
+      else { dest += text[q]; q++; }
     }
-    if (k >= n || text[k] !== '>') return null;
-    j = k + 1;
+    if (q >= n || text[q] !== '>') return null;
+    p = q + 1;
   } else {
     let depth = 0;
-    while (j < n) {
-      const c = text[j];
-      if (c === '\\' && j + 1 < n && isAsciiPunct(text.charCodeAt(j + 1))) { dest += text[j + 1]; j += 2; continue; }
+    while (p < n) {
+      const c = text[p];
+      if (c === '\\' && p + 1 < n && isAsciiPunct(text.charCodeAt(p + 1))) { dest += text[p + 1]; p += 2; continue; }
       if (c === ' ' || c === '\t' || c === '\n') break;
       if (c === '(') depth++;
       if (c === ')') {
         if (depth === 0) break;
         depth--;
       }
-      dest += c; j++;
+      dest += c; p++;
     }
   }
   // optional whitespace, optional title, optional whitespace, ')'
   // (a title must be preceded by whitespace — otherwise, e.g. after an
   // angle-bracket destination, the quote belongs to the destination)
-  let k = j;
-  while (k < n && (text[k] === ' ' || text[k] === '\t' || text[k] === '\n')) k++;
+  let q = skipWs(p);
   let title = null;
-  if (k < n && (text[k] === '"' || text[k] === "'" || text[k] === '(')) {
-    if (k === j) return null; // no whitespace before the title
-    const q = text[k];
-    const close = q === '(' ? ')' : q;
-    let t = '', m = k + 1, ok = false;
-    while (m < n) {
-      const c = text[m];
-      if (c === '\\' && m + 1 < n && isAsciiPunct(text.charCodeAt(m + 1))) { t += text[m + 1]; m += 2; continue; }
+  if (q < n && (text[q] === '"' || text[q] === "'" || text[q] === '(')) {
+    if (q === p) return null; // no whitespace before the title
+    const quote = text[q];
+    const close = quote === '(' ? ')' : quote;
+    let titleText = '', r = q + 1, ok = false;
+    while (r < n) {
+      const c = text[r];
+      if (c === '\\' && r + 1 < n && isAsciiPunct(text.charCodeAt(r + 1))) { titleText += text[r + 1]; r += 2; continue; }
       if (c === close) { ok = true; break; }
       if (c === '\n') {
         // a newline inside a title is allowed only when the same line also
         // has content after it is closed later; keep it verbatim
-        t += '\n'; m++; continue;
+        titleText += '\n'; r++; continue;
       }
-      t += c; m++;
+      titleText += c; r++;
     }
     if (!ok) return null;
-    title = t;
-    k = m + 1;
-    while (k < n && (text[k] === ' ' || text[k] === '\t' || text[k] === '\n')) k++;
+    title = titleText;
+    q = skipWs(r + 1);
   }
-  if (k >= n || text[k] !== ')') return null;
-  return { dest, title, next: k + 1 };
+  if (q >= n || text[q] !== ')') return null;
+  return { dest, title, next: q + 1 };
 }
 
-// Parse a bracketed label starting at `i` ('['). Returns {label, next} or
+// Read a bracketed label starting at `i` ('['). Returns {label, next} or
 // null. Labels do not nest (an unescaped '[' inside is invalid) and end
-// at the first unescaped ']'; backslashes are kept verbatim in the label.
+// at the first unescaped ']'; backslashes stay verbatim in the label.
 // A newline is allowed unless followed by a blank line.
 function parseLabel(text, i) {
   const n = text.length;
   if (text[i] !== '[') return null;
-  let j = i + 1, label = '';
-  while (j < n) {
-    const c = text[j];
-    if (c === '\\' && j + 1 < n) { label += c + text[j + 1]; j += 2; continue; }
+  let p = i + 1, label = '';
+  while (p < n) {
+    const c = text[p];
+    if (c === '\\' && p + 1 < n) { label += c + text[p + 1]; p += 2; continue; }
     if (c === '[') return null;
-    if (c === ']') return { label, next: j + 1 };
+    if (c === ']') return { label, next: p + 1 };
     if (c === '\n') {
-      let k = j + 1;
-      while (k < n && (text[k] === ' ' || text[k] === '\t')) k++;
-      if (k < n && text[k] === '\n') return null;
-      label += '\n'; j++;
+      let q = p + 1;
+      while (q < n && (text[q] === ' ' || text[q] === '\t')) q++;
+      if (q < n && text[q] === '\n') return null;
+      label += '\n'; p++;
       continue;
     }
-    label += c; j++;
+    label += c; p++;
   }
   return null;
 }
 
-// True when any node in `children` (recursively) is a link node.
-// True when the children contain a bracket-formed link (autolinks do
-// not count: a bracket autolink <...> may appear inside link text, and
-// an extended autolink is unlinked below when the outer link forms).
+// True when the children hold a bracket-formed link anywhere inside.
+// Autolinks do not count: a bracket autolink <...> may appear inside
+// link text, and an extended autolink is unlinked below when the outer
+// link forms.
 function containsLink(children) {
-  for (const nd of children) {
-    if (typeof nd === 'string') continue;
-    if (nd.k === 6 && !nd.auto) return true;
-    if (nd.k === 3 || nd.k === 4 || nd.k === 5 || nd.k === 6) {
-      if (containsLink(nd.c)) return true;
-    }
+  for (let idx = 0; idx < children.length; idx++) {
+    const node = children[idx];
+    if (typeof node === 'string' || node.k === undefined) continue;
+    if (node.k === 6 && !node.auto) return true;
+    if (node.k >= 3 && node.k <= 6 && node.c && containsLink(node.c)) return true;
   }
   return false;
 }
@@ -923,19 +923,23 @@ function containsLink(children) {
 // back into plain text (bracket autolinks <...> stay links).
 function unlinkExtAutolinks(children) {
   const out = [];
-  for (const nd of children) {
-    if (typeof nd === 'string') { out.push(nd); continue; }
-    if (nd.k === 6 && nd.auto === 'ext') {
+  for (const node of children) {
+    if (typeof node === 'string') { out.push(node); continue; }
+    if (node.k === 6 && node.auto === 'ext') {
       let raw = '';
-      for (const ch of nd.c) raw += typeof ch === 'string' ? ch : (ch.raw !== undefined ? ch.raw : ch.s);
+      for (const part of node.c) {
+        if (typeof part === 'string') raw += part;
+        else if (part.raw !== undefined) raw += part.raw;
+        else raw += part.s;
+      }
       out.push(raw);
       continue;
     }
-    if ((nd.k === 3 || nd.k === 4 || nd.k === 5 || nd.k === 6) && nd.c) {
-      out.push({ ...nd, c: unlinkExtAutolinks(nd.c) });
+    if ((node.k === 3 || node.k === 4 || node.k === 5 || node.k === 6) && node.c) {
+      out.push({ ...node, c: unlinkExtAutolinks(node.c) });
       continue;
     }
-    out.push(nd);
+    out.push(node);
   }
   return out;
 }
@@ -944,18 +948,20 @@ function unlinkExtAutolinks(children) {
 // contribute their alt, links contribute their text, raw HTML and hard
 // breaks contribute nothing, code contributes its text.
 function altTextOf(children) {
-  let s = '';
-  for (const nd of children) {
-    if (typeof nd === 'string') s += nd;
-    else if (nd.k === 0) s += nd.s;
-    else if (nd.k === 1 || nd.k === 2) { /* raw HTML / hard break: nothing */ }
-    else if (nd.k === 8) s += nd.raw !== undefined ? nd.raw : nd.s;
-    else if (nd.k === 9) s += nd.s;
-    else if (nd.k === 'd') s += nd.s;
-    else if (nd.k === 3 || nd.k === 4 || nd.k === 5 || nd.k === 6) s += altTextOf(nd.c);
-    else if (nd.k === 7) s += nd.alt;
+  let text = '';
+  for (const node of children) {
+    if (typeof node === 'string') { text += node; continue; }
+    switch (node.k) {
+      case 0: text += node.s; break;
+      case 1: case 2: break; // raw HTML / hard break: nothing
+      case 8: text += node.raw !== undefined ? node.raw : node.s; break;
+      case 9: text += node.s; break;
+      case 'd': text += node.s; break;
+      case 3: case 4: case 5: case 6: text += altTextOf(node.c); break;
+      case 7: text += node.alt; break;
+    }
   }
-  return s;
+  return text;
 }
 
 // --- link-label validation (marked's link/reflink label pattern) ---
@@ -973,28 +979,28 @@ function altTextOf(children) {
 // full/collapsed references.
 function validLabel(raw) {
   const n = raw.length;
-  let pos = 0;
-  while (pos < n) {
-    const c = raw[pos];
+  let p = 0;
+  while (p < n) {
+    const c = raw[p];
     if (c === '[') {
-      const end = matchLabelBracket(raw, pos);
-      if (end < 0) return false;
-      pos = end;
+      const after = matchLabelBracket(raw, p);
+      if (after < 0) return false;
+      p = after;
     } else if (c === '\\') {
-      if (pos + 1 >= n) return false;
-      pos += 2;
+      if (p + 1 >= n) return false;
+      p += 2;
     } else if (c === '`') {
       // a run of 2+ backticks reaching the end of the label
-      let k = pos;
-      while (k < n && raw[k] === '`') k++;
-      if (k === n && k - pos >= 2) return true;
-      const end = matchLabelCodeSpan(raw, pos);
-      if (end < 0) return false;
-      pos = end;
+      let q = p;
+      while (q < n && raw[q] === '`') q++;
+      if (q === n && q - p >= 2) return true;
+      const after = matchLabelCodeSpan(raw, p);
+      if (after < 0) return false;
+      p = after;
     } else if (c === ']') {
       return false;
     } else {
-      pos++;
+      p++;
     }
   }
   return true;
@@ -1003,20 +1009,20 @@ function validLabel(raw) {
 // Nested bracket group: '[' + (inner bracket | escaped char |
 // non-bracket char)* + ']'. Returns the index after ']' or -1.
 function matchLabelBracket(s, pos) {
-  let k = pos + 1;
-  while (k < s.length) {
-    const c = s[k];
+  let q = pos + 1;
+  while (q < s.length) {
+    const c = s[q];
     if (c === '[') {
-      const inner = matchLabelBracketLe(s, k);
-      if (inner < 0) return -1;
-      k = inner;
+      const afterInner = matchLabelBracketLe(s, q);
+      if (afterInner < 0) return -1;
+      q = afterInner;
     } else if (c === '\\') {
-      if (k + 1 >= s.length) return -1;
-      k += 2;
+      if (q + 1 >= s.length) return -1;
+      q += 2;
     } else if (c === ']') {
-      return k + 1;
+      return q + 1;
     } else {
-      k++;
+      q++;
     }
   }
   return -1;
@@ -1025,18 +1031,18 @@ function matchLabelBracket(s, pos) {
 // One-level bracket group (marked's `brackets`): '[' + (escaped char |
 // non-bracket char)* + ']'. Returns the index after ']' or -1.
 function matchLabelBracketLe(s, pos) {
-  let k = pos + 1;
-  while (k < s.length) {
-    const c = s[k];
+  let q = pos + 1;
+  while (q < s.length) {
+    const c = s[q];
     if (c === '\\') {
-      if (k + 1 >= s.length) return -1;
-      k += 2;
+      if (q + 1 >= s.length) return -1;
+      q += 2;
     } else if (c === ']') {
-      return k + 1;
+      return q + 1;
     } else if (c === '[') {
       return -1;
     } else {
-      k++;
+      q++;
     }
   }
   return -1;
@@ -1047,36 +1053,37 @@ function matchLabelBracketLe(s, pos) {
 // the closing run, or -1 when there is no closing run.
 function matchLabelCodeSpan(s, pos) {
   const n = s.length;
-  let open = pos;
-  while (open < n && s[open] === '`') open++;
-  let m = open;
-  while (m < n && s[m] !== '`') m++;
-  if (m >= n) return -1;
-  let close = m;
-  while (close < n && s[close] === '`') close++;
-  return close;
+  let op = pos;
+  while (op < n && s[op] === '`') op++;
+  let mid = op;
+  while (mid < n && s[mid] !== '`') mid++;
+  if (mid >= n) return -1;
+  let cl = mid;
+  while (cl < n && s[cl] === '`') cl++;
+  return cl;
 }
 
 // Ot code span (marked's anyPunctuationOutsideCode code-span alternative):
-// an opening backtick run, content that starts and ends with a non-backtick
-// character (it may hold shorter backtick runs inside — those are what the
-// Ot mask replaces with '+'), and a closing run of the same length not
-// followed by another backtick. Returns the index after the closing run,
-// or -1. This is the code-span grammar the blockSkip mask sees, after the
-// Ot mask has neutralised the inner backticks.
+// an opening backtick run, content that starts and ends with a
+// non-backtick character (it may hold shorter backtick runs inside —
+// those are what the Ot mask replaces with '+'), and a closing run of
+// the same length not followed by another backtick. Returns the index
+// after the closing run, or -1. This is the code-span grammar the
+// blockSkip mask sees, after the Ot mask has neutralised the inner
+// backticks.
 function matchOtCodeSpan(s, pos) {
   const n = s.length;
-  let open = pos;
-  while (open < n && s[open] === '`') open++;
-  const L = open - pos;
-  if (L === 0 || open >= n || s[open] === '`') return -1;
-  let k = open;
-  while (k < n) {
-    if (s[k] !== '`') { k++; continue; }
-    let r = k;
-    while (r < n && s[r] === '`') r++;
-    if (r - k === L) return r;
-    k = r;
+  let op = pos;
+  while (op < n && s[op] === '`') op++;
+  const len = op - pos;
+  if (len === 0 || op >= n || s[op] === '`') return -1;
+  let q = op;
+  while (q < n) {
+    if (s[q] !== '`') { q++; continue; }
+    let runEnd = q;
+    while (runEnd < n && s[runEnd] === '`') runEnd++;
+    if (runEnd - q === len) return runEnd;
+    q = runEnd;
   }
   return -1;
 }
@@ -1090,93 +1097,93 @@ function matchOtCodeSpan(s, pos) {
 // outer emStrong scan never sees the label's delimiters.
 function blockSkipLabelOk(raw) {
   const n = raw.length;
-  let pos = 0;
-  while (pos < n) {
-    const c = raw[pos];
+  let p = 0;
+  while (p < n) {
+    const c = raw[p];
     if (c === '[' || c === ']') return false;
-    if (c === '\\') { if (pos + 1 >= n) return false; pos += 2; continue; }
+    if (c === '\\') { if (p + 1 >= n) return false; p += 2; continue; }
     if (c === '`') {
-      const end = matchOtCodeSpan(raw, pos);
-      if (end < 0) return false;
-      pos = end;
+      const after = matchOtCodeSpan(raw, p);
+      if (after < 0) return false;
+      p = after;
       continue;
     }
-    pos++;
+    p++;
   }
   return true;
 }
 
-// Balanced-paren destination after ']( ' (marked's blockSkip `link` dest:
-// one nesting level). text[p] must be '('. Returns the index after the
-// closing ')' or -1.
+// Balanced-paren destination after ']( ' (marked's blockSkip `link`
+// dest: one nesting level). text[p] must be '('. Returns the index
+// after the closing ')' or -1.
 function blockSkipDestEnd(text, p) {
   const n = text.length;
-  let k = p + 1, depth = 0;
-  while (k < n) {
-    const c = text[k];
-    if (c === '\\') { k += 2; continue; }
-    if (c === '(') { if (depth > 0) return -1; depth++; k++; continue; }
+  let q = p + 1, depth = 0;
+  while (q < n) {
+    const c = text[q];
+    if (c === '\\') { q += 2; continue; }
+    if (c === '(') { if (depth > 0) return -1; depth++; q++; continue; }
     if (c === ')') {
-      if (depth === 0) return k + 1;
-      depth--; k++; continue;
+      if (depth === 0) return q + 1;
+      depth--; q++; continue;
     }
-    k++;
+    q++;
   }
   return -1;
 }
 
 // The Ot mask (marked's anyPunctuationOutsideCode), length-preserving:
 // a code span keeps its delimiter backticks but has the backticks inside
-// its content replaced with '+'; a backslash-escaped punctuation character
-// is replaced with '++'. Positions in the result match the original text,
-// so the blockSkip scan below can run on it directly.
+// its content replaced with '+'; a backslash-escaped punctuation
+// character is replaced with '++'. Positions in the result match the
+// original text, so the blockSkip scan below can run on it directly.
 function otMaskedText(text) {
   // Fast path: the Ot mask only changes backslash-escaped punctuation
   // and backticks inside code spans. With neither present it is the
   // identity — skip the split/join entirely.
   if (!text.includes('`') && !text.includes('\\')) return text;
-  const chars = text.split('');
-  const n = chars.length;
-  let i = 0;
-  while (i < n) {
-    if (text[i] === '\\' && i + 1 < n && isAsciiPunct(text.charCodeAt(i + 1))) {
-      chars[i] = '+'; chars[i + 1] = '+'; i += 2; continue;
+  const out = text.split('');
+  const n = out.length;
+  let p = 0;
+  while (p < n) {
+    if (text[p] === '\\' && p + 1 < n && isAsciiPunct(text.charCodeAt(p + 1))) {
+      out[p] = '+'; out[p + 1] = '+'; p += 2; continue;
     }
-    if (text[i] === '`') {
-      const end = matchOtCodeSpan(text, i);
+    if (text[p] === '`') {
+      const end = matchOtCodeSpan(text, p);
       if (end >= 0) {
-        let open = i;
-        while (open < n && text[open] === '`') open++;
-        const L = open - i;
-        for (let k = open; k < end - L; k++) if (chars[k] === '`') chars[k] = '+';
-        i = end; continue;
+        let op = p;
+        while (op < n && text[op] === '`') op++;
+        const len = op - p;
+        for (let q = op; q < end - len; q++) if (out[q] === '`') out[q] = '+';
+        p = end; continue;
       }
-      let j = i;
-      while (j < n && text[j] === '`') j++;
-      i = j; continue;
+      let q = p;
+      while (q < n && text[q] === '`') q++;
+      p = q; continue;
     }
-    i++;
+    p++;
   }
-  return chars.join('');
+  return out.join('');
 }
 
 // A blockSkip code-span chunk on the masked text: a maximal backtick run,
-// non-backtick content, and a closing run of the same length (not followed
-// by another backtick — the run is maximal, so that is automatic).
-// Returns the index after the closing run, or -1.
+// non-backtick content, and a closing run of the same length (not
+// followed by another backtick — the run is maximal, so that is
+// automatic). Returns the index after the closing run, or -1.
 function matchBlockSkipCodeSpan(s, pos) {
   const n = s.length;
-  let open = pos;
-  while (open < n && s[open] === '`') open++;
-  const L = open - pos;
-  if (L === 0) return -1;
-  let k = open;
-  while (k < n && s[k] !== '`') k++;
-  if (k === open || k >= n) return -1;
-  let r = k;
-  while (r < n && s[r] === '`') r++;
-  if (r - k !== L) return -1;
-  return r;
+  let op = pos;
+  while (op < n && s[op] === '`') op++;
+  const len = op - pos;
+  if (len === 0) return -1;
+  let q = op;
+  while (q < n && s[q] !== '`') q++;
+  if (q === op || q >= n) return -1;
+  let runEnd = q;
+  while (runEnd < n && s[runEnd] === '`') runEnd++;
+  if (runEnd - q !== len) return -1;
+  return runEnd;
 }
 
 // A blockSkip `link` match starting at `pos` (s[pos] === '[') on the
@@ -1186,22 +1193,22 @@ function matchBlockSkipCodeSpan(s, pos) {
 // the closing ')' or -1.
 function matchBlockSkipLink(s, pos) {
   const n = s.length;
-  let k = pos + 1;
-  while (k < n) {
-    if (s[k] === '\\') { k += 2; continue; }
-    if (s[k] === '`') {
-      const end = matchBlockSkipCodeSpan(s, k);
-      if (end < 0) return -1;
-      k = end; continue;
+  let q = pos + 1;
+  while (q < n) {
+    if (s[q] === '\\') { q += 2; continue; }
+    if (s[q] === '`') {
+      const after = matchBlockSkipCodeSpan(s, q);
+      if (after < 0) return -1;
+      q = after; continue;
     }
-    if (s[k] === '[' || s[k] === ']') {
-      if (s[k] === ']' && s[k + 1] === '(') {
-        const destEnd = blockSkipDestEnd(s, k + 1);
-        if (destEnd >= 0) return destEnd;
+    if (s[q] === '[' || s[q] === ']') {
+      if (s[q] === ']' && s[q + 1] === '(') {
+        const afterDest = blockSkipDestEnd(s, q + 1);
+        if (afterDest >= 0) return afterDest;
       }
       return -1;
     }
-    k++;
+    q++;
   }
   return -1;
 }
@@ -1212,59 +1219,60 @@ function matchBlockSkipLink(s, pos) {
 // Delimiters inside these ranges are invisible to the outer emphasis
 // scan (they are re-lexed only inside a link that actually forms).
 function blockSkipRanges(text) {
-  const s = otMaskedText(text);
-  const n = s.length;
-  const ranges = [];
-  let i = 0;
-  while (i < n) {
-    const c = s[i];
+  const masked = otMaskedText(text);
+  const n = masked.length;
+  const spans = [];
+  let p = 0;
+  while (p < n) {
+    const c = masked[p];
     if (c === '[') {
-      const end = matchBlockSkipLink(s, i);
-      if (end >= 0) { ranges.push([i, end]); i = end; continue; }
-      i++; continue;
+      const after = matchBlockSkipLink(masked, p);
+      if (after >= 0) { spans.push([p, after]); p = after; continue; }
+      p++; continue;
     }
     if (c === '`') {
-      if (i > 0 && s[i - 1] === '`') { i++; continue; }
-      const end = matchBlockSkipCodeSpan(s, i);
-      if (end >= 0) { ranges.push([i, end]); i = end; continue; }
-      i++; continue;
+      if (p > 0 && masked[p - 1] === '`') { p++; continue; }
+      const after = matchBlockSkipCodeSpan(masked, p);
+      if (after >= 0) { spans.push([p, after]); p = after; continue; }
+      p++; continue;
     }
     if (c === '<') {
-      if (s[i + 1] !== ' ') {
-        let k = i + 1;
-        while (k < n && s[k] !== '>' && s[k] !== '<') k++;
-        if (k < n && s[k] === '>') { ranges.push([i, k + 1]); i = k + 1; continue; }
+      if (masked[p + 1] !== ' ') {
+        let q = p + 1;
+        while (q < n && masked[q] !== '>' && masked[q] !== '<') q++;
+        if (q < n && masked[q] === '>') { spans.push([p, q + 1]); p = q + 1; continue; }
       }
-      i++; continue;
+      p++; continue;
     }
-    if (c === '\\') { i += 2; continue; }
-    i++;
+    if (c === '\\') { p += 2; continue; }
+    p++;
   }
-  return ranges;
+  return spans;
 }
 
 // marked's Be(): true when the label (raw text between `start` and `end`
-// in `text`) contains a '<' that starts an HTML tag or autolink extending
-// past the end of the label. Such a label rejects the link outright
-// (inline, reference, and shortcut alike). A '<' inside a code span does
-// not count, and a tag/autolink fully inside the label is skipped.
+// in `text`) contains a '<' that starts an HTML tag or autolink
+// extending past the end of the label. Such a label rejects the link
+// outright (inline, reference, and shortcut alike). A '<' inside a code
+// span does not count, and a tag/autolink fully inside the label is
+// skipped.
 function labelHasRunawayTag(text, start, end) {
-  const label = text.slice(start, end);
-  if (!label.includes('<')) return false;
-  for (let s = 0; s < label.length; s++) {
-    if (label[s] === '\\') { s++; continue; }
-    if (label[s] === '`') {
-      const close = matchLabelCodeSpan(label, s);
-      if (close >= 0) { s = close - 1; continue; }
+  const raw = text.slice(start, end);
+  if (!raw.includes('<')) return false;
+  for (let q = 0; q < raw.length; q++) {
+    if (raw[q] === '\\') { q++; continue; }
+    if (raw[q] === '`') {
+      const after = matchLabelCodeSpan(raw, q);
+      if (after >= 0) { q = after - 1; continue; }
     }
-    if (label[s] !== '<') continue;
-    const pos = start + s;
-    const tag = tryHtmlTag(text, pos);
-    const auto = tag ? null : tryBracketAutolink(text, pos);
-    const len = tag ? tag.next - pos : auto ? auto.next - pos : 0;
-    if (len > 0) {
-      if (len > end - pos) return true;
-      s += len - 1;
+    if (raw[q] !== '<') continue;
+    const at = start + q;
+    const tagHit = tryHtmlTag(text, at);
+    const autoHit = tagHit ? null : tryBracketAutolink(text, at);
+    const spanLen = tagHit ? tagHit.next - at : autoHit ? autoHit.next - at : 0;
+    if (spanLen > 0) {
+      if (spanLen > end - at) return true;
+      q += spanLen - 1;
     }
   }
   return false;
