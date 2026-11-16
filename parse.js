@@ -331,26 +331,48 @@ function parseInline(text, refs) {
       if (!INLINE_SPECIAL[head] && !(atWordStart && isEmailLocalCode(head))) {
         let scan = pos + 1;
         let prevWasLocal = isEmailLocalCode(head);
+        let wordFrom = pos; // where the current word began, if it began in this run
         while (scan < len) {
           const code = text.charCodeAt(scan);
+          if (code === 95 && prevWasLocal) {
+            // '_' inside a word: it is an inline special (a would-be
+            // emphasis delimiter), but it is also an email-local
+            // character, and marked tries the email at the word start
+            // before the delimiter exists. Peek through the rest of
+            // the word: when an '@' follows, end the run at the word
+            // start so the dispatch below attempts the email there.
+            let pk = scan + 1;
+            while (pk < len && isEmailLocalCode(text.charCodeAt(pk))) pk += 1;
+            if (pk < len && text.charCodeAt(pk) === 64) { scan = wordFrom; break; }
+            break;
+          }
           if (INLINE_SPECIAL[code]) break;
           if (code === 64) {
             // '@': retreat to the start of the word it belongs to.
             let w = scan - 1;
             while (w >= pos && isEmailLocalCode(text.charCodeAt(w))) w -= 1;
             if (w + 1 > pos) { scan = w + 1; break; }
-            // The word started at or before pos, so the email attempt
-            // there already covered this '@': it is ordinary text.
+            if (w + 1 === pos && pos > 0 && text.charCodeAt(pos - 1) === 95) {
+              // The word begins exactly at pos, right after an
+              // underscore delimiter: no email attempt has run at pos
+              // yet (the '_' made pos look mid-word), so fall through
+              // to the dispatch and let it try there.
+              scan = pos;
+              break;
+            }
+            // The word started before pos, so the email attempt there
+            // already covered this '@': it is ordinary text.
             prevWasLocal = false;
             scan += 1;
             continue;
           }
           if (!prevWasLocal && isTriggerLetterCode(code)) break;
+          if (!prevWasLocal && isEmailLocalCode(code)) wordFrom = scan;
           prevWasLocal = isEmailLocalCode(code);
           scan += 1;
         }
-        if (scan > pos) { pending += text.slice(pos, scan); pos = scan; }
-        continue;
+        if (scan > pos) { pending += text.slice(pos, scan); pos = scan; continue; }
+        // scan === pos: fall through to the per-character dispatch.
       }
     }
     const ch = text[pos];
