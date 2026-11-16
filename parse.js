@@ -337,7 +337,7 @@ function parseInline(text, refs) {
         open = leftFlank; close = rightFlank;
       }
       flush();
-      const d = { k: 'd', s: ch.repeat(run), ch, n: run, open, close, active: true, link: false, image: false, pos: i };
+      const d = { k: 'd', s: ch.repeat(run), ch, n: run, on: run, open, close, active: true, link: false, image: false, pos: i };
       nodes.push(d); delims.push(d);
       i += run;
       continue;
