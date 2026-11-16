@@ -2425,116 +2425,125 @@ function isLazyCandidate(line, k, lines, end) {
 // Match a list marker at the start of a (body) line. Returns null or
 // {ordered, bullet, num, delim, markerEndCol, markerEndIdx, contentIndent}.
 function matchListStart(b) {
-  let p = 0;
-  while (p < b.length && b[p] === ' ' && p < 3) p++;
-  let ordered = false, bullet = null, num = null, delim = null;
-  if (b[p] === '-' || b[p] === '+' || b[p] === '*') {
-    bullet = b[p];
-    p++;
-  } else if (b[p] >= '0' && b[p] <= '9') {
+  let p = leadingSpacesUpTo3(b);
+  let ordered = false;
+  let bullet = null;
+  let num = null;
+  let delim = null;
+  const first = b[p];
+  if (first === '-' || first === '+' || first === '*') {
+    bullet = first;
+    p += 1;
+  } else if (first >= '0' && first <= '9') {
     let q = p;
-    while (q < b.length && b[q] >= '0' && b[q] <= '9') q++;
-    if (q - p > 9) return null;
+    while (q < b.length && b[q] >= '0' && b[q] <= '9') q += 1;
+    if (q - p > 9) return null; // at most 9 digits
     const d = b[q];
     if (d !== '.' && d !== ')') return null;
-    ordered = true; num = parseInt(b.slice(p, q), 10); delim = d;
+    ordered = true;
+    num = parseInt(b.slice(p, q), 10);
+    delim = d;
     p = q + 1;
   } else return null;
-  // the marker must be followed by a space, a tab, or the end of the line
-  const after = b[p];
-  if (after !== undefined && after !== ' ' && after !== '\t') return null;
-  // content indent: marker column + 1..4 columns of whitespace, else +1
-  let col = p, q = p;
+  // The marker must be followed by a space, a tab, or the line's end.
+  const follower = b[p];
+  if (follower !== undefined && follower !== ' ' && follower !== '\t') return null;
+  // Content indent: when 1..4 columns of whitespace follow the marker,
+  // the content starts after them; otherwise it starts one column after
+  // the marker.
+  let col = p;
+  let q = p;
   while (q < b.length && (b[q] === ' ' || b[q] === '\t')) {
-    if (b[q] === ' ') col++;
-    else col += 4 - (col % 4);
-    q++;
+    col += b[q] === ' ' ? 1 : 4 - (col % 4);
+    q += 1;
   }
   const wsWidth = col - p;
   const contentIndent = (q >= b.length || wsWidth < 1 || wsWidth > 4) ? p + 1 : col;
   return { ordered, bullet, num, delim, markerEndCol: p, markerEndIdx: p, contentIndent };
 }
 
-// Does this list item interrupt a paragraph? Bullets always; ordered only
-// when the start number is 1 — except inside a list item's content,
-// where any list marker starts a nested list (marked: '- foo\n  49. Uses'
-// makes a nested <ol start="49">, while a blockquote or top-level
-// paragraph keeps '49.' as text). An empty item never interrupts.
+// Does this list marker interrupt a paragraph? Bullets always do;
+// ordered markers only when the start number is 1 — except inside a
+// list item's content, where any marker starts a nested list (marked:
+// '- foo\n  49. Uses' makes a nested <ol start="49">, while a blockquote
+// or a top-level paragraph keeps '49.' as text). An empty item —
+// nothing but whitespace after the marker — never interrupts.
 function listInterruptsPara(lst, b, inList) {
   if (lst.ordered && lst.num !== 1 && !inList) return false;
-  // empty item: nothing but whitespace after the marker
   let q = lst.markerEndIdx;
-  while (q < b.length && (b[q] === ' ' || b[q] === '\t')) q++;
+  while (q < b.length && (b[q] === ' ' || b[q] === '\t')) q += 1;
   return q < b.length;
 }
 
+// Two markers belong to the same list when both are bullets with the
+// same character, or both are ordered with the same delimiter.
 function sameList(a, lst) {
   if (a.ordered !== lst.ordered) return false;
-  if (a.ordered) return a.delim === lst.delim;
-  return a.bullet === lst.bullet;
+  return a.ordered ? a.delim === lst.delim : a.bullet === lst.bullet;
 }
 
-// Strip the marker + whitespace from an item's first line, leaving the
-// content (a tab straddling the content indent leaves spaces, and further
-// leading tabs expand per their original columns).
+// Remove the marker and its following whitespace from an item's first
+// line, leaving the content. A tab straddling the content indent leaves
+// spaces for its remainder, and any further leading tabs expand
+// according to their original columns.
 function stripItemMarker(b, lst) {
-  let column = lst.markerEndCol, p = lst.markerEndIdx;
+  let column = lst.markerEndCol;
+  let p = lst.markerEndIdx;
   while (column < lst.contentIndent && p < b.length) {
     const c = b[p];
-    if (c === ' ') { column++; p++; }
-    else if (c === '\t') {
-      const width = 4 - (column % 4);
-      if (column + width <= lst.contentIndent) { column += width; p++; }
-      else {
-        let out = ' '.repeat(column + width - lst.contentIndent);
-        let col2 = column + width;
-        let q = p + 1;
-        while (q < b.length && (b[q] === ' ' || b[q] === '\t')) {
-          if (b[q] === ' ') { out += ' '; col2++; q++; }
-          else { const width2 = 4 - (col2 % 4); out += ' '.repeat(width2); col2 += width2; q++; }
-        }
-        return out + b.slice(q);
-      }
-    } else break;
+    if (c === ' ') { column += 1; p += 1; continue; }
+    if (c !== '\t') break;
+    const width = 4 - (column % 4);
+    if (column + width <= lst.contentIndent) { column += width; p += 1; continue; }
+    // Straddling tab: keep its remainder as spaces, then expand the
+    // rest of the whitespace run at its original columns.
+    let out = ' '.repeat(column + width - lst.contentIndent);
+    let origCol = column + width;
+    let q = p + 1;
+    while (q < b.length && (b[q] === ' ' || b[q] === '\t')) {
+      if (b[q] === ' ') { out += ' '; origCol += 1; q += 1; }
+      else { const w2 = 4 - (origCol % 4); out += ' '.repeat(w2); origCol += w2; q += 1; }
+    }
+    return out + b.slice(q);
   }
   return b.slice(p);
 }
 
-// Scan stripped item lines for an unclosed fenced code block. A fenced
-// code block inside a list item captures every line until its closing
-// fence, even lines with less indent than the item's content indent
-// (e.g. a `function f(a, b) {` line at column 0 inside a ``` fence).
-// Returns the open fence {ch, len} or null.
+// Scan an item's stripped lines for a fenced code block that is still
+// open. A fence inside a list item captures every line until its
+// closing fence, even lines indented less than the item's content
+// indent (a `function f(a, b) {` line at column 0 inside a ``` fence).
+// Returns the open fence { ch, len } or null.
 function openFenceIn(itemLines) {
   let open = null;
   for (const line of itemLines) {
-    const bodyText = body(line);
-    if (open) {
-      if (matchFencedClose(bodyText, open.ch, open.len)) open = null;
+    const lineBody = body(line);
+    if (open !== null) {
+      if (matchFencedClose(lineBody, open.ch, open.len)) open = null;
     } else {
-      const start = matchFencedStart(bodyText);
-      if (start) open = start;
+      open = matchFencedStart(lineBody);
     }
   }
   return open;
 }
 
-// Whether an under-indented line is fence content inside a list item.
-// Mirrors marked's list tokenizer: the line must not itself start a
-// block that interrupts the item (fence, ATX heading, HTML block,
-// blockquote, list marker, thematic break); the previous item line must
-// not be blank (a blank line ends the fence's capture); and the previous
-// item line's stripped content must not start a fence/heading/html/hr
-// (so a column-0 line right after the opening fence is NOT captured —
-// the fence only begins once an indented content line precedes it).
+// Is an under-indented line fence content inside a list item? Following
+// marked's list tokenizer: the line itself must not start a block that
+// interrupts the item (fence, ATX heading, HTML block, blockquote, list
+// marker, thematic break); the previous item line must not be blank (a
+// blank line ends the fence's capture); and the previous item line's
+// stripped content must not start a fence, heading, HTML block or
+// thematic break — so a column-0 line directly after the opening fence
+// is NOT captured: the fence only begins once an indented content line
+// precedes it.
 function fenceContentLine(line, itemLines) {
   const lineBody = body(line);
   if (matchFencedStart(lineBody) || matchATX(lineBody) || htmlBlockType(lineBody, false) > 0 ||
       stripQuote(line) !== null || matchListStart(lineBody) || isThematicBreak(lineBody)) return false;
   const prevLine = itemLines[itemLines.length - 1];
   if (prevLine === undefined || isBlank(prevLine)) return false;
-  const prevTrimmed = body(prevLine).trimStart();
-  if (matchFencedStart(prevTrimmed) || matchATX(prevTrimmed) || htmlBlockType(prevTrimmed, false) > 0 || isThematicBreak(prevTrimmed)) return false;
+  const prevHead = body(prevLine).trimStart();
+  if (matchFencedStart(prevHead) || matchATX(prevHead) || htmlBlockType(prevHead, false) > 0 || isThematicBreak(prevHead)) return false;
   return true;
 }
 
@@ -2546,50 +2555,57 @@ function parseList(lines, i, end, refs) {
   let q = i;
   let prevItemIndent = first.contentIndent;
   while (q < end) {
-    // find the next non-blank line; blank lines are only consumed when a
-    // new item follows (otherwise parseBlocks must see them, so a blank
-    // line after the last item still marks the list/item loose)
+    // Find the next non-blank line. Blank lines are consumed only when
+    // a new item actually follows; otherwise parseBlocks must see them
+    // (a blank line after the last item still loosens the list/item).
     let r = q;
-    while (r < end && isBlank(lines[r])) r++;
+    while (r < end && isBlank(lines[r])) r += 1;
     if (r >= end) break;
     const b = body(lines[r]);
     const marker = matchListStart(b);
     const indent = indentCols(b);
-    // a marker is a new item of this list iff same type, indent <= 3 and
-    // indent < the previous item's content indent
+    // A marker opens a new item of THIS list exactly when it is the
+    // same list type, indented at most 3, and indented less than the
+    // previous item's content indent.
     if (!marker || !sameList(marker, first) || indent > 3 || indent >= prevItemIndent) break;
-    if (isThematicBreak(b)) break; // e.g. "* * *" ends the list
+    if (isThematicBreak(b)) break; // "* * *" ends the list, for example
     if (r > q && items.length > 0) loose = true;
     q = r;
     const itemIndent = marker.contentIndent;
     const itemLines = [stripItemMarker(b, marker) + (hasNL(lines[q]) ? '\n' : '')];
-    q++;
+    q += 1;
     const fixups = [];
-    let res = null;
-    const ensure = () => {
-      if (!res) { res = parseBlocks(itemLines, 0, itemLines.length, refs, false, true, true); applyLazyFixups(res, fixups); }
-      return res;
+    let parsed = null;
+    const ensureParsed = () => {
+      if (parsed === null) {
+        parsed = parseBlocks(itemLines, 0, itemLines.length, refs, false, true, true);
+        applyLazyFixups(parsed, fixups);
+      }
+      return parsed;
     };
+    // Gather the item's remaining lines.
     while (q < end) {
       const line = lines[q];
       if (isBlank(line)) {
-        // a blank line inside an open fence is fence content, whatever
-        // its indent (a fence captures lines until its closer)
+        // A blank line inside an open fence is fence content, whatever
+        // its indent: a fence captures lines until its closer.
         if (openFenceIn(itemLines)) {
           itemLines.push(line);
-          q++; res = null; continue;
+          q += 1;
+          parsed = null;
+          continue;
         }
-        // an empty item followed by a blank line ends the item
+        // An empty item followed by a blank line ends the item.
         if (!itemLines.some((l) => !isBlank(l))) break;
         let r2 = q + 1;
-        while (r2 < end && isBlank(lines[r2])) r2++;
+        while (r2 < end && isBlank(lines[r2])) r2 += 1;
         if (r2 < end) {
           const nextBody = body(lines[r2]);
           const nextMarker = matchListStart(nextBody);
           if (nextMarker && sameList(nextMarker, first) && indentCols(nextBody) <= 3 && indentCols(nextBody) < itemIndent) break;
           if (indentCols(nextBody) >= itemIndent) {
             for (; q < r2; q++) itemLines.push(lines[q]);
-            res = null;
+            parsed = null;
             continue;
           }
         }
@@ -2597,48 +2613,50 @@ function parseList(lines, i, end, refs) {
       }
       const lineBody = body(line);
       const lineMarker = matchListStart(lineBody);
-      // any list marker at indent < content indent ends the item (a
-      // different bullet/delimiter starts a new list, not a lazy line)
+      // Any list marker indented less than the content indent ends the
+      // item (a different bullet or delimiter starts a new list; it is
+      // not a lazy line).
       if (lineMarker && indentCols(lineBody) < itemIndent) break;
       if (indentCols(lineBody) >= itemIndent) {
         itemLines.push(stripCols(expandLeadingTabs(lineBody, 0), itemIndent) + (hasNL(line) ? '\n' : ''));
-        q++;
-        res = null;
+        q += 1;
+        parsed = null;
         continue;
       }
-      // an under-indented line still belongs to the item when it is
+      // An under-indented line still belongs to the item when it is
       // fence content (see fenceContentLine): the fence has already
-      // begun with an indented content line, the line does not start a
-      // new block, and the previous line was not blank
+      // begun with an indented content line, the line starts no new
+      // block, and the previous line was not blank.
       if (openFenceIn(itemLines) && fenceContentLine(line, itemLines)) {
         itemLines.push(line);
-        q++;
-        res = null;
+        q += 1;
+        parsed = null;
         continue;
       }
-      // lazy continuation: extends an open paragraph/table in the item
+      // Lazy continuation: extends an open paragraph or table inside
+      // the item.
       if (isLazyCandidate(line, q, lines, end)) {
-        const r = ensure();
+        const r = ensureParsed();
         if (r.lastNonBlank && deepLastParaTable(r.blocks)) {
           const tail = r.blocks[r.blocks.length - 1];
           if (tail.t === 'para' || tail.t === 'table') {
-            // a list item's text is lexed line by line, so a lazy line
-            // is always dedented (the indented-code merge)
+            // An item's text is lexed line by line, so a lazy line here
+            // is always dedented (the indented-code merge).
             const appended = lazyAppendBody(lineBody, itemIndent);
             if (appended.fix) fixups.push(appended.fix);
             itemLines.push(appended.body + (hasNL(line) ? '\n' : ''));
           } else {
-            // nested blockquote/list: pass the line down unstripped
+            // A nested blockquote or list takes the line unstripped.
             itemLines.push(line);
           }
-          q++;
-          res = null;
+          q += 1;
+          parsed = null;
           continue;
         }
       }
       break;
     }
-    res = ensure();
+    const res = ensureParsed();
     if (res.blankBetween) loose = true;
     items.push(res.blocks);
     prevItemIndent = itemIndent;
