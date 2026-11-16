@@ -213,91 +213,100 @@ const BR = { k: 2 }; // hard break
 
 // Delimiter nodes double as text nodes: {k:'d', s, ch, n, open, close,
 // active, link, image}. Plain text is a bare string.
-// marked's <a>-tag inLink leak: an opening <a...> tag parsed as INLINE
-// HTML (in a paragraph — a lone <a> on its own line is an HTML block and
-// does NOT trigger this) sets a document-persistent state that suppresses
-// extended autolinks (www/scheme/email) in all following inline content,
-// across paragraphs, until a closing </a> appears. Bracket autolinks
-// <...>, bracket emails and inline links are NOT suppressed. Reset per
-// document in parse(). inRawBlock is marked's other inline state: inside
-// <pre>/<code>/<kbd>/<script> text, character references are NOT decoded
-// and text is emitted raw (unescaped). Also reset per document.
+// marked carries two pieces of inline state across a whole document.
+// First, the <a> leak: an opening <a ...> tag met as INLINE html inside a
+// paragraph (a lone <a> on its own line forms an HTML block instead and
+// does not count) switches off extended autolinks — www., schemes, email —
+// for every later inline run, across paragraphs, until an exact </a>
+// shows up. Bracket autolinks <...>, bracket emails and inline links are
+// unaffected. Second, the raw-text state: while inside <pre>, <code>,
+// <kbd> or <script>, character references stay undecoded and text goes out
+// verbatim. Both flags reset for each document in parse().
 let inLink = false;
 let inRawBlock = false;
 
-// For a tag's text, the raw-block tag name when the tag is a
-// <pre>/<code>/<kbd>/<script> opener or closer whose name is followed by
-// whitespace or '>' (marked's start/endPreScriptTag tests), with a leading
-// '/' for closers; null otherwise. <pre/> and <codex> do not count.
+// Which raw-content tag a tag string is, if any: 'pre' / 'code' / 'kbd' /
+// 'script' for an opener, '/pre' etc. for a closer. Counts only when the
+// name is followed by whitespace or '>' (marked's start/endPreScriptTag
+// rule), so <pre/> and <codex> return null.
 function rawBlockTagName(t) {
-  let j = 1, close = false;
-  if (t[j] === '/') { close = true; j++; }
-  let k = j;
-  while (k < t.length && ((t[k] >= 'a' && t[k] <= 'z') || (t[k] >= 'A' && t[k] <= 'Z'))) k++;
-  const name = t.slice(j, k).toLowerCase();
+  let p = 1;
+  const closing = t.charCodeAt(p) === 47; // '/'
+  if (closing) p++;
+  const nameStart = p;
+  while (p < t.length) {
+    const code = t.charCodeAt(p);
+    if ((code >= 97 && code <= 122) || (code >= 65 && code <= 90)) p++;
+    else break;
+  }
+  const name = t.slice(nameStart, p).toLowerCase();
   if (name !== 'pre' && name !== 'code' && name !== 'kbd' && name !== 'script') return null;
-  const after = t[k];
+  const after = t[p];
   if (after !== '>' && !isWhitespace(after)) return null;
-  return (close ? '/' : '') + name;
+  return closing ? '/' + name : name;
 }
 
 function parseInline(text, refs) {
   const nodes = [];
   const delims = [];
   let buf = '';
-  // Text runs accumulated while inRawBlock is on are emitted as raw nodes
-  // (k:9, rendered verbatim — no entity decoding, no escaping), matching
-  // marked's inRawBlock text tokens. A flush always happens at a tag
-  // boundary, so a run never straddles the raw-block edge.
-  const flush = () => { if (buf !== '') { nodes.push(inRawBlock ? { k: 9, s: buf, raw: buf } : buf); buf = ''; } };
+  // While inRawBlock is on, buffered text is emitted as a raw node (k:9 —
+  // rendered verbatim, no entity decoding, no escaping), mirroring
+  // marked's inRawBlock text tokens. A flush always lands on a tag edge,
+  // so no run ever straddles the raw-block boundary.
+  function flush() {
+    if (buf === '') return;
+    nodes.push(inRawBlock ? { k: 9, s: buf, raw: buf } : buf);
+    buf = '';
+  }
   const n = text.length;
   let i = 0;
 
-  // Flanking info for a delimiter run starting at `i` with length `len`.
-  // punctFn defaults to isUnicodePunct; '~' runs use a punct test that
-  // excludes '~' (GFM strikethrough flanking treats '~' as neither
-  // punctuation nor a word character).
-  function flanking(i, len, punctFn) {
-    const punct = punctFn || isUnicodePunct;
-    const prev = i === 0 ? '' : text[i - 1];
-    const next = i + len >= n ? '' : text[i + len];
-    const prevWs = prev === '' || isWhitespace(prev);
-    const nextWs = next === '' || isWhitespace(next);
-    const prevPunct = prev !== '' && punct(prev);
-    const nextPunct = next !== '' && punct(next);
-    const leftFlank = !nextWs && (!nextPunct || prevWs || prevPunct);
-    const rightFlank = !prevWs && (!prevPunct || nextWs || nextPunct);
-    return [leftFlank, rightFlank, prev, next];
+  // Flanking facts for a delimiter run at `pos` of length `len`.
+  // punctFn defaults to isUnicodePunct; '~' runs pass a test that treats
+  // '~' as neither punctuation nor a word character (GFM strikethrough
+  // flanking rule).
+  function flanking(pos, len, punctFn) {
+    const testPunct = punctFn || isUnicodePunct;
+    const before = pos === 0 ? '' : text[pos - 1];
+    const after = pos + len >= n ? '' : text[pos + len];
+    const beforeWs = before === '' || isWhitespace(before);
+    const afterWs = after === '' || isWhitespace(after);
+    const beforePunct = before !== '' && testPunct(before);
+    const afterPunct = after !== '' && testPunct(after);
+    const canOpen = !afterWs && (!afterPunct || beforeWs || beforePunct);
+    const canClose = !beforeWs && (!beforePunct || afterWs || afterPunct);
+    return [canOpen, canClose, before, after];
   }
 
   while (i < n) {
-    // Fast path: accumulate a run of plain text in one slice. The run
-    // stops at any special char, at a trigger letter at a word start
-    // (an autolink could begin there), and at the word start before
-    // an '@' (an email could begin there). Everything inside the run
-    // is ordinary text that needs no per-character dispatch.
+    // Plain-text run, taken in one slice instead of a char at a time. A
+    // run ends at any special character, at a trigger letter that begins
+    // a word (an extended autolink might start there), and at the start
+    // of the word before an '@' (an email might start there). Nothing
+    // inside a run needs per-character dispatch.
     {
-      const c0 = text.charCodeAt(i);
-      const atWordStart = !(i > 0 && isEmailLocalCode(text.charCodeAt(i - 1)));
-      if (!INLINE_SPECIAL[c0] && !(atWordStart && isEmailLocalCode(c0))) {
-        let j = i + 1;
-        let prevLocal = isEmailLocalCode(c0);
-        while (j < n) {
-          const c = text.charCodeAt(j);
-          if (INLINE_SPECIAL[c]) break;
-          if (c === 64) { // '@': stop at the word start before it
-            let k = j - 1;
-            while (k >= i && isEmailLocalCode(text.charCodeAt(k))) k--;
-            if (k + 1 > i) { j = k + 1; break; }
-            // the word starts at or before i: the email check there
-            // already ran, so this '@' is plain text
-            prevLocal = false; j++; continue;
+      const first = text.charCodeAt(i);
+      const wordStart = !(i > 0 && isEmailLocalCode(text.charCodeAt(i - 1)));
+      if (!INLINE_SPECIAL[first] && !(wordStart && isEmailLocalCode(first))) {
+        let scan = i + 1;
+        let prevIsLocal = isEmailLocalCode(first);
+        while (scan < n) {
+          const code = text.charCodeAt(scan);
+          if (INLINE_SPECIAL[code]) break;
+          if (code === 64) { // '@': back up to the start of its word
+            let w = scan - 1;
+            while (w >= i && isEmailLocalCode(text.charCodeAt(w))) w--;
+            if (w + 1 > i) { scan = w + 1; break; }
+            // the word began at or before i, so the email check there
+            // already ran and this '@' is ordinary text
+            prevIsLocal = false; scan++; continue;
           }
-          if (!prevLocal && isTriggerLetterCode(c)) break;
-          prevLocal = isEmailLocalCode(c);
-          j++;
+          if (!prevIsLocal && isTriggerLetterCode(code)) break;
+          prevIsLocal = isEmailLocalCode(code);
+          scan++;
         }
-        if (j > i) { buf += text.slice(i, j); i = j; }
+        if (scan > i) { buf += text.slice(i, scan); i = scan; }
         continue;
       }
     }
@@ -312,12 +321,12 @@ function parseInline(text, refs) {
         continue;
       }
       if (nx !== undefined && isAsciiPunct(nx.charCodeAt(0))) {
-        // a backslash-escaped '&' is a literal ampersand, never the start
-        // of an entity: pre-escape it so the renderer leaves it escaped.
-        // Inside a raw block the text is emitted verbatim, so every
-        // escapable character is pre-escaped here instead.
+        // An escaped '&' is a literal ampersand, never an entity start,
+        // so it is pre-escaped and the renderer leaves it alone. Inside
+        // a raw block the text goes out verbatim, so every escapable
+        // character is pre-escaped here instead.
         if (inRawBlock) {
-          buf += nx === '&' ? '&amp;' : nx === '<' ? '&lt;' : nx === '>' ? '&gt;' : nx === '"' ? '&quot;' : nx === "'" ? '&#39;' : nx;
+          buf += nx === '<' ? '&lt;' : nx === '>' ? '&gt;' : nx === '"' ? '&quot;' : nx === "'" ? '&#39;' : nx === '&' ? '&amp;' : nx;
         } else {
           buf += nx === '&' ? '&amp;' : nx;
         }
@@ -330,33 +339,33 @@ function parseInline(text, refs) {
     if (ch === '`') {
       let run = 0;
       while (i + run < n && text[i + run] === '`') run++;
-      // find a matching run of exactly `run` backticks — but stop at a
-      // ']' that would close an active link opener: the link regex
-      // consumes the backticks as a label chunk first, so the code span
-      // must not swallow that ']' (a code span whose closer really is
-      // past the ']' only forms when the link cannot form)
-      let j = i + run, found = -1, abort = false;
-      while (j < n) {
-        if (text[j] === '`') {
+      // Hunt for a closing run of exactly `run` backticks — but stop at
+      // a ']' that would close a live link opener, because the link
+      // pattern eats the backticks as label text first; the code span
+      // must not swallow that ']' (a span whose closer really lies past
+      // the ']' only forms when the link cannot form at all).
+      let scan = i + run, closer = -1, cutShort = false;
+      while (scan < n) {
+        if (text[scan] === '`') {
           let r2 = 0;
-          while (j + r2 < n && text[j + r2] === '`') r2++;
-          if (r2 === run) { found = j; break; }
-          j += r2;
-        } else if (text[j] === ']' && (text[j + 1] === '(' || text[j + 1] === '[' || j + 1 >= n)) {
-          if (wouldFormLink(text, j, delims, refs)) { abort = true; break; }
-          j++;
-        } else j++;
+          while (scan + r2 < n && text[scan + r2] === '`') r2++;
+          if (r2 === run) { closer = scan; break; }
+          scan += r2;
+        } else if (text[scan] === ']' && (text[scan + 1] === '(' || text[scan + 1] === '[' || scan + 1 >= n)) {
+          if (wouldFormLink(text, scan, delims, refs)) { cutShort = true; break; }
+          scan++;
+        } else scan++;
       }
-      if (found < 0 || abort) { buf += '`'.repeat(run); i += run; continue; }
-      let content = text.slice(i + run, found).replace(/\n/g, ' ');
-      // an empty code span is literal text, not a code node
-      if (content === '') { buf += '`'.repeat(run) + '`'.repeat(run); i = found + run; continue; }
+      if (closer < 0 || cutShort) { buf += '`'.repeat(run); i += run; continue; }
+      let content = text.slice(i + run, closer).replace(/\n/g, ' ');
+      // an empty code span stays literal text rather than a code node
+      if (content === '') { buf += '`'.repeat(run * 2); i = closer + run; continue; }
       if (content.length >= 2 && content[0] === ' ' && content[content.length - 1] === ' ' && /[^ ]/.test(content)) {
         content = content.slice(1, -1);
       }
       flush();
       nodes.push({ k: 0, s: content });
-      i = found + run;
+      i = closer + run;
       continue;
     }
 
@@ -367,60 +376,62 @@ function parseInline(text, refs) {
       const tag = tryHtmlTag(text, i);
       if (tag) {
         flush(); nodes.push({ k: 1, s: tag.text });
-        // marked's tag state, exactly as its startATag/endATag and
-        // start/endPreScriptTag tests: an <a> opens inLink only when the
-        // char after the 'a' is a SPACE (<a> and <a/> and <a\t...> do
-        // not; a self-closing <a /> DOES), and only an exact </a> closes
-        // it (</a > does not). A <pre>/<code>/<kbd>/<script> opener
-        // (name followed by whitespace or '>') turns inRawBlock on, and
-        // any of the four closers turns it off again.
+        // Update marked's tag state, following its startATag/endATag and
+        // start/endPreScriptTag rules: an <a> opens inLink only when a
+        // SPACE follows the 'a' (<a>, <a/> and <a\t...> do not; a
+        // self-closing <a /> DOES), and only an exact </a> closes it
+        // (</a > does not). A <pre>/<code>/<kbd>/<script> opener (name
+        // followed by whitespace or '>') switches inRawBlock on, and any
+        // of the four closers switches it off again.
         const t = tag.text;
-        if (!inLink && t.length >= 3 && (t[1] === 'a' || t[1] === 'A') && t[2] === ' ') inLink = true;
-        else if (inLink && t.length === 4 && t[1] === '/' && (t[2] === 'a' || t[2] === 'A') && t[3] === '>') inLink = false;
+        const second = t[1];
+        if (!inLink && t.length >= 3 && (second === 'a' || second === 'A') && t[2] === ' ') inLink = true;
+        else if (inLink && t.length === 4 && second === '/' && (t[2] === 'a' || t[2] === 'A') && t[3] === '>') inLink = false;
         const rawName = rawBlockTagName(t);
         if (rawName) {
-          if (!inRawBlock && rawName[0] !== '/') inRawBlock = true;
-          else if (inRawBlock && rawName[0] === '/') inRawBlock = false;
+          const closingTag = rawName[0] === '/';
+          if (!closingTag && !inRawBlock) inRawBlock = true;
+          else if (closingTag && inRawBlock) inRawBlock = false;
         }
         i = tag.next; continue;
       }
-      // literal '<': escaped here directly — except inside a raw block,
-      // where text is emitted verbatim
+      // a literal '<' is escaped here directly — except inside a raw
+      // block, where text goes out verbatim
       buf += inRawBlock ? '<' : '&lt;'; i++; continue;
     }
 
     // --- '&': numeric character reference (named entities stay literal) ---
-    // Inside a raw block, references are NOT decoded: the '&' is literal.
+    // Inside a raw block references are NOT decoded: the '&' is literal.
     if (ch === '&') {
-      const dec = inRawBlock ? null : decodeNumRefAt(text, i);
-      if (dec) {
+      const decoded = inRawBlock ? null : decodeNumRefAt(text, i);
+      if (decoded) {
         // a decoded '&' is a literal ampersand, never an entity start
-        buf += dec[0] === '&' ? '&amp;' : dec[0];
-        i += dec[1]; continue;
+        buf += decoded[0] === '&' ? '&amp;' : decoded[0];
+        i += decoded[1]; continue;
       }
       buf += '&'; i++; continue;
     }
 
     // --- emphasis / strikethrough delimiter runs ---
     if (ch === '*' || ch === '_' || ch === '~') {
-      let run = 0;
-      while (i + run < n && text[i + run] === ch) run++;
-      // a '~' run of 3+ is literal text, never a strikethrough delimiter
-      if (ch === '~' && run >= 3) { buf += '~'.repeat(run); i += run; continue; }
-      const [leftFlank, rightFlank] = ch === '~'
-        ? flanking(i, run, (c) => isUnicodePunct(c) && c !== '~')
-        : flanking(i, run);
-      let open, close;
+      let len = 0;
+      while (i + len < n && text[i + len] === ch) len++;
+      // a '~' run of 3 or more is literal text, never a strikethrough delimiter
+      if (ch === '~' && len >= 3) { buf += '~'.repeat(len); i += len; continue; }
+      const [canOpen, canClose] = ch === '~'
+        ? flanking(i, len, (c) => isUnicodePunct(c) && c !== '~')
+        : flanking(i, len);
+      let mayOpen, mayClose;
       if (ch === '_') {
-        open = leftFlank && (!rightFlank || (i > 0 && isUnicodePunct(text[i - 1])));
-        close = rightFlank && (!leftFlank || (i + run < n && isUnicodePunct(text[i + run])));
+        mayOpen = canOpen && (!canClose || (i > 0 && isUnicodePunct(text[i - 1])));
+        mayClose = canClose && (!canOpen || (i + len < n && isUnicodePunct(text[i + len])));
       } else {
-        open = leftFlank; close = rightFlank;
+        mayOpen = canOpen; mayClose = canClose;
       }
       flush();
-      const d = { k: 'd', s: ch.repeat(run), ch, n: run, on: run, open, close, active: true, link: false, image: false, pos: i };
+      const d = { k: 'd', s: ch.repeat(len), ch, n: len, on: len, open: mayOpen, close: mayClose, active: true, link: false, image: false, pos: i };
       nodes.push(d); delims.push(d);
-      i += run;
+      i += len;
       continue;
     }
 
