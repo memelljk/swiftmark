@@ -529,7 +529,7 @@ function parseInline(text, refs) {
       }
     }
   }
-  processEmphasis(nodes, delims, 0);
+  processEmphasis(nodes, delims, 0, text);
   return renderNodes(nodes);
 }
 
@@ -571,9 +571,55 @@ function stripTags(html) {
 
 /* ---------------- emphasis (delimiter stack) ---------------- */
 
+// Marked's emStrong forward scan, over the delimiter stack: starting
+// from opener O, walk the same-char runs after it and return the stack
+// index where the scan stops (m <= 0), or -1 when it runs out.
+// Uses original run lengths (on): in marked's left-to-right order the
+// scan runs before any pair inside O's range forms, so intermediate
+// runs count at full length even when our closer-first loop already
+// folded them into an inner pair.
+function markedScanStopIndex(delims, oi, text) {
+  const opener = delims[oi];
+  const ch = opener.ch;
+  let m = opener.n, f = 0;
+  const y = opener.on;
+  // R flag (marked emStrong): the opener can open and the char before
+  // it is non-whitespace — then a pure closer is also run through the
+  // rule of three instead of always closing
+  const p = opener.pos > 0 ? text[opener.pos - 1] : '';
+  const after = opener.pos + opener.on < text.length ? text[opener.pos + opener.on] : '';
+  const d = after !== '' && isUnicodePunct(after);
+  const h = p === '*' || p === '_' || (p !== '' && isUnicodePunct(p));
+  const R = p !== '' && !isWhitespace(p) && (d || (ch === '*' && !h));
+  for (let k = oi + 1; k < delims.length; k++) {
+    const run = delims[k];
+    if (run.ch !== ch || run.link || run.masked) continue;
+    // a run inside a pair of the opposite char is invisible to this
+    // scan (marked's emStrongRDelim skip alternative); a run inside a
+    // same-char pair still counts at its original length
+    if (run.inPairCh !== undefined && run.inPairCh !== ch) continue;
+    if (!run.open && !run.close) continue; // neither-flanking: invisible
+    const b = run.on;
+    if (run.open && !run.close) { m += b; continue; } // pure opener
+    if ((run.open && run.close) || R) {
+      // both-flanking (or R): rule of three decides opener vs closer
+      if (y % 3 !== 0 && (y + b) % 3 === 0) { f += b; continue; }
+    }
+    m -= b;
+    if (m > 0) continue;
+    return k;
+  }
+  return -1; // scan ran out without m <= 0: no pair
+}
+
+// True when marked's forward scan from opener oi stops exactly at ci.
+function markedScanPairs(delims, oi, ci, text) {
+  return markedScanStopIndex(delims, oi, text) === ci;
+}
+
 // Process emphasis/strikethrough closers left to right, oldest first.
 // fromStack: only delimiters at or after this stack index may open/close.
-function processEmphasis(nodes, delims, fromStack) {
+function processEmphasis(nodes, delims, fromStack, text) {
   let ci = fromStack;
   while (ci < delims.length) {
     const closer = delims[ci];
@@ -589,6 +635,24 @@ function processEmphasis(nodes, delims, fromStack) {
         // rule of three: skip unless both counts are multiples of 3
         if ((d.close || closer.open) && ((d.n + closer.n) % 3 === 0) && !(d.n % 3 === 0 && closer.n % 3 === 0)) {
           oi--; continue;
+        }
+        // marked's emStrong scan, single-char openers only: a lone `*`
+        // or `_` opener pairs with this closer only when marked's
+        // forward scan stops here. (Multi-char openers are left on the
+        // old logic: a failed full-length scan is retried by marked as
+        // a shorter run, so the scan must not reject them — that retry
+        // is what forms cm-408/413/442/444/445.)
+        if (closer.ch !== '~' && d.n === 1 && d.on === 1 && !markedScanPairs(delims, oi, ci, text)) { oi--; continue; }
+        // Don't let a single-char closer steal chars from a TWO-char
+        // opener when that opener pairs with a later multi-char closer
+        // at full length: the strong forms first in marked, and the
+        // single closer is then literal inside it (doc-01/11/26).
+        // (An opener with 3+ chars can spare one: the single closer
+        // pairs first and the leftover still forms the strong — cm-430
+        // `***foo* bar**` — so the block is only for n === 2.)
+        if (closer.ch !== '~' && closer.n === 1 && d.n === 2) {
+          const stop = markedScanStopIndex(delims, oi, text);
+          if (stop > ci && delims[stop].n >= 2) { oi--; continue; }
         }
         opener = d; break;
       }
@@ -607,8 +671,19 @@ function processEmphasis(nodes, delims, fromStack) {
     nodes.splice(ni + 1, nj - ni - 1, wrap);
     // delimiters between opener and closer are now inside the wrap
     const oiStack = delims.indexOf(opener), ciStack = delims.indexOf(closer);
-    delims.splice(oiStack + 1, ciStack - oiStack - 1);
-    ci = delims.indexOf(closer);
+    // keep the delimiters between opener and closer in the stack
+    // (marked inactive) so a later outer opener's marked-scan can still
+    // see them with their original lengths — splicing them out would
+    // make the scan undercount and pair runs marked leaves literal.
+    // Record the innermost pair's char: a run inside a pair of the
+    // OPPOSITE char is invisible to the outer scan (marked's
+    // emStrongRDelim skip alternative jumps over __...*...__ spans),
+    // while a run inside a same-char pair still counts.
+    for (let k = oiStack + 1; k < ciStack; k++) {
+      if (delims[k].inPairCh === undefined) delims[k].inPairCh = closer.ch;
+      delims[k].active = false;
+    }
+    ci = ciStack;
     if (closer.n === 0) ci++;
     // (closer with remaining delims is re-processed against earlier openers)
   }
@@ -1204,7 +1279,7 @@ function tryCloseBracketOpener(text, i, nodes, delims, opener, refs) {
   const href = cleanUrl(dest);
   if (href === null) return null;
   // emphasis inside the link text is resolved before wrapping
-  processEmphasis(nodes, delims, delims.indexOf(opener) + 1);
+  processEmphasis(nodes, delims, delims.indexOf(opener) + 1, text);
   const ni2 = nodes.indexOf(opener);
   let children = nodes.slice(ni2 + 1);
   // extended autolinks do not form inside link text
