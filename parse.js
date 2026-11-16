@@ -1935,190 +1935,222 @@ function tryHtmlTag(text, i) {
   return null;
 }
 
-/* ---------------- block parser ---------------- */
+/* ============ the block parser ============ */
 
+// The block-level tag names of HTML block type 6.
 const BLOCK_TAGS = new Set(('address article aside base basefont blockquote body caption center col colgroup dd details dialog dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 head header hr html iframe legend li link main menu menuitem nav noframes ol optgroup option p param section source summary table tbody td tfoot th thead title tr track ul').split(' '));
 
-// Parse blocks in lines[start..end). Returns {blocks, blankBetween,
-// lastKind ('para'|'table'|other), lastNonBlank}. When stripAtEnd is true
-// (inner content of a blockquote/list item), an HTML block running to the
-// end of the range loses its trailing newline.
+// Parse the blocks in lines[start..end). The result carries the block
+// list plus three facts the callers need: blankBetween (a blank line
+// appeared between two blocks — it loosens lists), lastKind (the final
+// block's type) and lastNonBlank (the range ends on a non-blank line).
+// stripAtEnd marks inner content (of a blockquote or list item): an
+// HTML block that runs to the end of the range then loses its trailing
+// newline.
 function parseBlocks(lines, start, end, refs, tight, stripAtEnd, inList) {
   const blocks = [];
   let blankBetween = false;
-  let pendingBlank = false;
+  let sawBlank = false;
   let i = start;
   while (i < end) {
-    if (isBlank(lines[i])) { pendingBlank = true; i++; continue; }
-    if (pendingBlank && blocks.length > 0) blankBetween = true;
-    pendingBlank = false;
+    if (isBlank(lines[i])) { sawBlank = true; i += 1; continue; }
+    if (sawBlank && blocks.length > 0) blankBetween = true;
+    sawBlank = false;
     const b = body(lines[i]);
-    // fenced code
-    const fen = matchFencedStart(b);
-    if (fen) { const r = parseFenced(lines, i, end, fen); blocks.push(r.block); i = r.next; continue; }
-    // ATX heading
+    // Fenced code first: a fence opener is unambiguous.
+    const fence = matchFencedStart(b);
+    if (fence) {
+      const r = parseFenced(lines, i, end, fence);
+      blocks.push(r.block);
+      i = r.next;
+      continue;
+    }
+    // ATX heading.
     const atx = matchATX(b);
-    if (atx) { blocks.push({ t: 'head', level: atx.level, text: atx.content }); i++; continue; }
-    // thematic break (before list, since --- is both)
-    if (isThematicBreak(b)) { blocks.push({ t: 'hr' }); i++; continue; }
-    // HTML block
+    if (atx) { blocks.push({ t: 'head', level: atx.level, text: atx.content }); i += 1; continue; }
+    // Thematic break — tested before lists, because --- is both.
+    if (isThematicBreak(b)) { blocks.push({ t: 'hr' }); i += 1; continue; }
+    // HTML block.
     const htmlType = htmlBlockType(b);
     if (htmlType > 0) {
       const r = parseHTML(lines, i, end, htmlType, stripAtEnd);
       if (r.block) { blocks.push(r.block); i = r.next; continue; }
-      // not really an HTML block after all — fall through to paragraph
+      // Not really an HTML block after all: fall through to paragraph.
     }
-    // blockquote
-    if (stripQuote(lines[i]) !== null) { const r = parseBlockquote(lines, i, end, refs); blocks.push(r.block); i = r.next; continue; }
-    // list
-    const lst = matchListStart(b);
-    if (lst) { const r = parseList(lines, i, end, refs); blocks.push(r.block); i = r.next; continue; }
-    // indented code (cannot interrupt a paragraph — but here we are at a
-    // block start, so it is code)
-    if (indentCols(b) >= 4) { const r = parseIndentedCode(lines, i, end); blocks.push(r.block); i = r.next; continue; }
-    // paragraph / table / link-reference definitions
-    const r = parseParagraph(lines, i, end, refs,
-      stripAtEnd, inList);
+    // Blockquote.
+    if (stripQuote(lines[i]) !== null) {
+      const r = parseBlockquote(lines, i, end, refs);
+      blocks.push(r.block);
+      i = r.next;
+      continue;
+    }
+    // List.
+    if (matchListStart(b)) {
+      const r = parseList(lines, i, end, refs);
+      blocks.push(r.block);
+      i = r.next;
+      continue;
+    }
+    // Indented code. It cannot interrupt a paragraph, but this loop
+    // only ever sits at a block start, so here it is code.
+    if (indentCols(b) >= 4) {
+      const r = parseIndentedCode(lines, i, end);
+      blocks.push(r.block);
+      i = r.next;
+      continue;
+    }
+    // Everything else: a paragraph, a table, or link reference
+    // definitions (possibly several in a row, possibly none).
+    const r = parseParagraph(lines, i, end, refs, stripAtEnd, inList);
     if (r.block) blocks.push(r.block);
     i = r.next;
   }
-  const tail = blocks[blocks.length - 1];
-  const endsWithText = end > start && !isBlank(lines[end - 1]);
-  return { blocks, blankBetween, lastKind: tail ? tail.t : null, lastNonBlank: endsWithText };
+  const last = blocks[blocks.length - 1];
+  return {
+    blocks,
+    blankBetween,
+    lastKind: last ? last.t : null,
+    lastNonBlank: end > start && !isBlank(lines[end - 1]),
+  };
 }
 
+// Join a paragraph's lines into its text, dropping the final newline.
 function joinParaLines(ls) {
-  const s = ls.join('');
-  return s.charCodeAt(s.length - 1) === 10 ? s.slice(0, -1) : s;
+  const joined = ls.join('');
+  return joined.charCodeAt(joined.length - 1) === 10 ? joined.slice(0, -1) : joined;
 }
 
-/* --- headings, thematic breaks, fenced code --- */
+/* --- ATX headings, thematic breaks, fenced and indented code --- */
+
+// Count the leading spaces of a line body, at most 3 (4+ is code).
+function leadingSpacesUpTo3(b) {
+  let i = 0;
+  while (i < b.length && i < 3 && b[i] === ' ') i += 1;
+  return i;
+}
 
 function matchATX(b) {
-  let i = 0;
-  while (i < b.length && b[i] === ' ' && i < 3) i++;
+  const indent = leadingSpacesUpTo3(b);
   let hashes = 0;
-  while (i + hashes < b.length && b[i + hashes] === '#') hashes++;
+  while (indent + hashes < b.length && b[indent + hashes] === '#') hashes += 1;
   if (hashes < 1 || hashes > 6) return null;
-  const after = b[i + hashes];
-  if (after !== undefined && after !== ' ' && after !== '\t') return null;
-  let content = b.slice(i + hashes);
-  content = content.replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
-  // a closing sequence of #s (preceded by a space), or a content made
-  // entirely of #s, leaves an empty heading
+  const follower = b[indent + hashes];
+  if (follower !== undefined && follower !== ' ' && follower !== '\t') return null;
+  let content = b.slice(indent + hashes).replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
+  // A closing run of #s (preceded by whitespace) is stripped; content
+  // made entirely of #s is a closing run too and leaves the heading
+  // empty.
   if (/^#+$/.test(content)) content = '';
   else {
-    const m = /[ \t]+#+$/.exec(content);
-    if (m) content = content.slice(0, m.index).replace(/[ \t]+$/, '');
+    const closing = /[ \t]+#+$/.exec(content);
+    if (closing) content = content.slice(0, closing.index).replace(/[ \t]+$/, '');
   }
   return { level: hashes, content };
 }
 
 function isThematicBreak(b) {
-  let i = 0;
-  while (i < b.length && b[i] === ' ' && i < 3) i++;
-  const ch = b[i];
+  const start = leadingSpacesUpTo3(b);
+  const ch = b[start];
   if (ch !== '*' && ch !== '-' && ch !== '_') return null;
-  let count = 0, j = i;
-  while (j < b.length) {
+  let count = 0;
+  for (let j = start; j < b.length; j++) {
     const c = b[j];
-    if (c === ch) count++;
+    if (c === ch) count += 1;
     else if (c !== ' ' && c !== '\t') return null;
-    j++;
   }
   return count >= 3;
 }
 
 function matchFencedStart(b) {
-  let i = 0;
-  while (i < b.length && b[i] === ' ' && i < 3) i++;
-  const ch = b[i];
+  const indent = leadingSpacesUpTo3(b);
+  const ch = b[indent];
   if (ch !== '`' && ch !== '~') return null;
   let len = 0;
-  while (i + len < b.length && b[i + len] === ch) len++;
+  while (indent + len < b.length && b[indent + len] === ch) len += 1;
   if (len < 3) return null;
-  const info = b.slice(i + len);
-  if (ch === '`' && info.includes('`')) return null;
-  return { ch, len, indent: i, info };
+  const info = b.slice(indent + len);
+  // A backtick fence's info string may not itself contain a backtick.
+  if (ch === '`' && info.indexOf('`') !== -1) return null;
+  return { ch, len, indent, info };
 }
 
 function matchFencedClose(b, ch, minLen) {
-  let p = 0;
-  while (p < b.length && b[p] === ' ' && p < 3) p++;
-  if (b[p] !== ch) return false;
+  const indent = leadingSpacesUpTo3(b);
+  if (b[indent] !== ch) return false;
   let len = 0;
-  while (p + len < b.length && b[p + len] === ch) len++;
+  while (indent + len < b.length && b[indent + len] === ch) len += 1;
   if (len < minLen) return false;
-  let q = p + len;
-  while (q < b.length && (b[q] === ' ' || b[q] === '\t')) q++;
+  let q = indent + len;
+  while (q < b.length && (b[q] === ' ' || b[q] === '\t')) q += 1;
   return q === b.length;
 }
 
-// Strip up to n leading whitespace characters from a fenced code
-// content line. Marked's Dt is character-based, so a leading tab counts
-// as one character and is removed whole (not expanded to 4 columns).
+// Remove up to n leading whitespace CHARACTERS from a fenced-code
+// content line. marked's Dt works character by character, so a leading
+// tab counts as one character and is removed whole — it is not expanded
+// to four columns first.
 function stripFenceIndent(b, n) {
   if (n <= 0) return b;
   let i = 0;
-  while (i < b.length && i < n && (b[i] === ' ' || b[i] === '\t')) i++;
+  while (i < b.length && i < n && (b[i] === ' ' || b[i] === '\t')) i += 1;
   return b.slice(i);
 }
 
 function parseFenced(lines, i, end, fen) {
   const content = [];
-  let j = i + 1, closed = false;
+  let j = i + 1;
+  let closed = false;
   while (j < end) {
     const b = body(lines[j]);
     if (matchFencedClose(b, fen.ch, fen.len)) { closed = true; break; }
-    // marked's Dt only compensates the opening fence's indent for
-    // backtick fences (its regex looks for ```); a tilde fence keeps
-    // its content indentation verbatim
-    content.push((fen.ch === '`' ? stripFenceIndent(b, fen.indent) : b) + (hasNL(lines[j]) ? '\n' : ''));
-    j++;
+    // marked's Dt compensates for the opening fence's indent only for
+    // backtick fences (its pattern looks for ```); a tilde fence keeps
+    // its content indentation exactly as written.
+    const lineText = fen.ch === '`' ? stripFenceIndent(b, fen.indent) : b;
+    content.push(lineText + (hasNL(lines[j]) ? '\n' : ''));
+    j += 1;
   }
   const info = fen.info.trim();
   const lang = info === '' ? null : unescapeBackslashes(info.split(/\s+/)[0]);
-  // fenced code text is the joined content minus one trailing '\n'
+  // The block's text is the joined content minus one trailing newline.
   let text = content.join('');
   if (text.charCodeAt(text.length - 1) === 10) text = text.slice(0, -1);
   return { block: { t: 'code', lang, text }, next: closed ? j + 1 : j };
 }
 
-// Resolve backslash escapes (ASCII punctuation only) in a string.
+// Resolve backslash escapes in a string (ASCII punctuation only; any
+// other backslash stays).
 function unescapeBackslashes(s) {
   let out = '';
   for (let k = 0; k < s.length; k++) {
-    if (s[k] === '\\' && k + 1 < s.length && isAsciiPunct(s.charCodeAt(k + 1))) { out += s[k + 1]; k++; }
-    else out += s[k];
+    if (s[k] === '\\' && k + 1 < s.length && isAsciiPunct(s.charCodeAt(k + 1))) {
+      out += s[k + 1];
+      k += 1;
+    } else out += s[k];
   }
   return out;
 }
-
-/* --- indented code --- */
 
 function parseIndentedCode(lines, i, end) {
   const content = [];
   let j = i;
   while (j < end) {
-    const b = body(lines[j]);
     if (isBlank(lines[j])) {
+      // A blank line belongs to the block only when a later line is
+      // indented code again; it keeps whatever spaces it has past the
+      // 4-column code indent.
       let k = j + 1;
-      while (k < end && isBlank(lines[k])) k++;
-      if (k < end && indentCols(body(lines[k])) >= 4) {
-        // a blank line keeps its spaces past the 4-column code indent
-        content.push(stripCols(body(lines[j]), 4) + (hasNL(lines[j]) ? '\n' : ''));
-        j++;
-        continue;
-      }
-      break;
-    }
-    if (indentCols(b) >= 4) {
-      content.push(stripCols(b, 4) + (hasNL(lines[j]) ? '\n' : ''));
-      j++;
+      while (k < end && isBlank(lines[k])) k += 1;
+      if (k >= end || indentCols(body(lines[k])) < 4) break;
+      content.push(stripCols(body(lines[j]), 4) + (hasNL(lines[j]) ? '\n' : ''));
+      j += 1;
       continue;
     }
-    break;
+    if (indentCols(body(lines[j])) < 4) break;
+    content.push(stripCols(body(lines[j]), 4) + (hasNL(lines[j]) ? '\n' : ''));
+    j += 1;
   }
+  // Trailing blank-ish lines are not part of the code.
   while (content.length > 0 && content[content.length - 1].trim() === '') content.pop();
   return { block: { t: 'code', lang: null, text: content.join('') }, next: j };
 }
