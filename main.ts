@@ -1,21 +1,30 @@
-// swiftmark driver: reads the case list, renders each markdown document
-// through ./parse.js one at a time, and writes the HTML strings back out
-// in the same order. Paths come from MAKEFUN_INPUT_DIR / MAKEFUN_OUTPUT_DIR
-// outside a container, and default to /input and /output inside one.
+// Batch driver for the markdown-render-speed-02 entry.
+//
+// The grader starts us as `node /bot/main.ts` (Node 22, native
+// type-stripping, so this file only uses erasable syntax). It points us at
+// a folder of cases through MAKEFUN_INPUT_DIR and expects the rendered
+// pages in MAKEFUN_OUTPUT_DIR; inside the grading container those are
+// /input and /output. We read every case, render it alone with `parse`
+// from parse.js, keep the results in the same order the cases arrived in,
+// and store them as one JSON array of HTML strings.
+
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from './parse.js';
 
-const inDir = process.env.MAKEFUN_INPUT_DIR ?? '/input';
-const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const inputDir = process.env.MAKEFUN_INPUT_DIR ?? '/input';
+const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-const raw = readFileSync(join(inDir, 'cases.json'), 'utf8');
-const docs = JSON.parse(raw) as Array<{ id: string; markdown: string }>;
-
-const rendered: string[] = new Array(docs.length);
-for (let i = 0; i < docs.length; i++) {
-  rendered[i] = parse(docs[i].markdown);
+interface Case {
+  id: string;
+  markdown: string;
 }
 
-mkdirSync(outDir, { recursive: true });
-writeFileSync(join(outDir, 'html.json'), JSON.stringify(rendered));
+const cases = JSON.parse(
+  readFileSync(join(inputDir, 'cases.json'), 'utf8'),
+) as Case[];
+
+const html = cases.map((c) => parse(c.markdown));
+
+mkdirSync(outputDir, { recursive: true });
+writeFileSync(join(outputDir, 'html.json'), JSON.stringify(html));
