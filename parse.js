@@ -2157,56 +2157,55 @@ function parseIndentedCode(lines, i, end) {
 
 /* --- HTML blocks (types 1-7) --- */
 
-// Returns 1..7 for a line starting an HTML block, else 0. `inPara` means
-// the line is inside a paragraph (type 7 cannot interrupt).
+// Classify the HTML block a line starts, if any: returns 1..7, else 0.
+// `inPara` says the line sits inside a paragraph, where type 7 may not
+// interrupt.
 function htmlBlockType(b, inPara) {
-  let p = 0;
-  while (p < b.length && b[p] === ' ' && p < 3) p++;
-  if (b[p] !== '<') return 0;
-  const rest = b.slice(p + 1);
-  const low = rest.toLowerCase();
-  // type 1: script/pre/style/textarea openers
+  const indent = leadingSpacesUpTo3(b);
+  if (b[indent] !== '<') return 0;
+  const rest = b.slice(indent + 1);
+  const lowered = rest.toLowerCase();
+  // Type 1: a script, pre, style or textarea opener.
   for (const name of ['script', 'pre', 'style', 'textarea']) {
-    if (low.startsWith(name)) {
-      const after = low[name.length];
-      if (after === undefined || /[\s>\/]/.test(after)) return 1;
+    if (lowered.startsWith(name)) {
+      const follower = lowered[name.length];
+      if (follower === undefined || /[\s>\/]/.test(follower)) return 1;
     }
   }
-  if (rest.startsWith('!--')) return 2;
-  if (rest.startsWith('?')) return 3;
-  if (rest[0] === '!' && rest[1] !== undefined && /[A-Za-z]/.test(rest[1])) return 4;
-  if (rest.startsWith('![CDATA[')) return 5;
-  // type 6: block-level tag
+  if (rest.startsWith('!--')) return 2; // comment
+  if (rest.startsWith('?')) return 3; // processing instruction
+  if (rest[0] === '!' && rest[1] !== undefined && /[A-Za-z]/.test(rest[1])) return 4; // declaration
+  if (rest.startsWith('![CDATA[')) return 5; // CDATA
+  // Type 6: an open or closing tag whose name is a block-level tag,
+  // followed by whitespace, '>', '/' or the end of the line.
   {
-    let q = 0;
-    if (rest[q] === '/') q++;
-    const nameStart = q;
+    let q = rest[0] === '/' ? 1 : 0;
+    const nameFrom = q;
     if (q < rest.length && isLetterCode(rest.charCodeAt(q))) {
-      q++;
-      while (q < rest.length && isTagNameCode(rest.charCodeAt(q))) q++;
-      const after = rest[q];
-      if ((after === undefined || /[\s>\/]/.test(after)) &&
-          BLOCK_TAGS.has(rest.slice(nameStart, q).toLowerCase())) return 6;
+      q += 1;
+      while (q < rest.length && isTagNameCode(rest.charCodeAt(q))) q += 1;
+      const follower = rest[q];
+      if ((follower === undefined || /[\s>\/]/.test(follower)) &&
+          BLOCK_TAGS.has(rest.slice(nameFrom, q).toLowerCase())) return 6;
     }
   }
-  if (!inPara) {
-    // type 7: a complete open/closing tag alone on the line
-    if (isCompleteTag(b)) return 7;
-  }
+  // Type 7: one complete tag alone on the line — only outside a
+  // paragraph.
+  if (!inPara && isCompleteTag(b)) return 7;
   return 0;
 }
 
-// True when the line is (up to 3 spaces +) one complete open or closing
-// tag and nothing else. Uses the strict inline tag grammar (tryHtmlTag),
-// so <m:abc> or <a href='bar'title=title> are NOT complete tags.
+// Is this line (after up to 3 spaces) exactly one complete open or
+// closing tag and nothing else? The strict inline tag grammar decides
+// (tryHtmlTag), so <m:abc> and <a href='bar'title=title> do NOT count.
 function isCompleteTag(b) {
-  let i = 0;
-  while (i < b.length && b[i] === ' ' && i < 3) i++;
-  if (b[i] !== '<') return false;
-  const tag = tryHtmlTag(b, i);
+  const indent = leadingSpacesUpTo3(b);
+  if (b[indent] !== '<') return false;
+  const tag = tryHtmlTag(b, indent);
   return tag !== null && tag.next === b.length;
 }
 
+// The literal that ends each of the marker-terminated block types.
 const HTML_END_MARKERS = { 2: '-->', 3: '?>', 4: '>', 5: ']]>' };
 
 function htmlBlockEndMarker(type) {
@@ -2221,39 +2220,46 @@ function htmlBlockEndMarker(type) {
 // line strips it); types 6-7 strip on any blank line. `stripWsBlank`
 // selects the types 6-7 behaviour.
 function htmlText(lines, i, j, end, stripAtEnd, stripWsBlank) {
-  let s = '';
-  for (let k = i; k < j; k++) s += lines[k];
-  if (j < end && s.charCodeAt(s.length - 1) === 10 && (stripWsBlank ? isBlank(lines[j]) : lines[j] === '\n' || lines[j] === '')) s = s.slice(0, -1);
-  else if (j >= end && stripAtEnd && s.charCodeAt(s.length - 1) === 10) s = s.slice(0, -1);
-  return s;
+  let text = '';
+  for (let k = i; k < j; k++) text += lines[k];
+  const endsNl = text.charCodeAt(text.length - 1) === 10;
+  if (!endsNl) return text;
+  if (j < end) {
+    const nextIsBlank = stripWsBlank ? isBlank(lines[j]) : lines[j] === '\n' || lines[j] === '';
+    if (nextIsBlank) return text.slice(0, -1);
+  } else if (stripAtEnd) {
+    return text.slice(0, -1);
+  }
+  return text;
 }
 
 function parseHTML(lines, i, end, type, stripAtEnd) {
-  const b = body(lines[i]);
   if (type === 1) {
-    const openMatch = /^ {0,3}<(script|pre|style|textarea)([\s>\/]|$)/i.exec(b);
-    const tagName = openMatch[1].toLowerCase();
-    const closePattern = new RegExp('</' + tagName + '\\s*>', 'i');
+    // Runs to the line holding the matching close tag — or to the end
+    // of the document when there is none.
+    const openMatch = /^ {0,3}<(script|pre|style|textarea)([\s>\/]|$)/i.exec(body(lines[i]));
+    const closePattern = new RegExp('</' + openMatch[1].toLowerCase() + '\\s*>', 'i');
     for (let q = i; q < end; q++) {
       if (closePattern.test(body(lines[q]))) {
         return { block: { t: 'html', text: htmlText(lines, i, q + 1, end, stripAtEnd) }, next: q + 1 };
       }
     }
-    // no closing tag: a type-1 block runs to the end of the document
     return { block: { t: 'html', text: htmlText(lines, i, end, end, stripAtEnd) }, next: end };
   }
   if (type >= 2 && type <= 5) {
+    // Runs to the first line containing the type's end marker, or to
+    // the end of the range.
     const marker = htmlBlockEndMarker(type);
     for (let q = i; q < end; q++) {
-      if (body(lines[q]).includes(marker)) {
+      if (body(lines[q]).indexOf(marker) !== -1) {
         return { block: { t: 'html', text: htmlText(lines, i, q + 1, end, stripAtEnd) }, next: q + 1 };
       }
     }
     return { block: { t: 'html', text: htmlText(lines, i, end, end, stripAtEnd) }, next: end };
   }
-  // types 6 and 7: consume until a blank line
+  // Types 6 and 7: consume lines until a blank line.
   let q = i + 1;
-  while (q < end && !isBlank(lines[q])) q++;
+  while (q < end && !isBlank(lines[q])) q += 1;
   return { block: { t: 'html', text: htmlText(lines, i, q, end, stripAtEnd, true) }, next: q };
 }
 
@@ -2266,11 +2272,12 @@ function parseHTML(lines, i, end, type, stripAtEnd) {
 // merge). A lazy setext-looking line is prefixed with 4 spaces so it
 // stays paragraph text instead of becoming a heading.
 function lazyAppendBody(b, ci) {
-  const ind = indentCols(b);
   let stripped = b;
-  if (ind >= ci) stripped = stripCols(b, ci);
+  if (indentCols(b) >= ci) stripped = stripCols(b, ci);
   if (indentCols(stripped) >= 4) stripped = stripCols(stripped, 4);
   if (/^ {0,3}(=+|-+) *$/.test(stripped)) {
+    // A setext-looking lazy line is guarded with four spaces so the
+    // re-parse keeps it as paragraph text instead of a heading.
     const guarded = '    ' + stripped.trim();
     return { body: guarded, fix: { appended: guarded, fixed: stripped.trim() } };
   }
@@ -2278,31 +2285,35 @@ function lazyAppendBody(b, ci) {
   return { body: b, fix: null };
 }
 
-// Re-apply the recorded lazy-line fix-ups to the last paragraph block
-// (re-parsing rebuilds the blocks from scratch, so the fix-ups must be
-// re-applied after every re-parse).
+// Re-apply the recorded lazy-line fix-ups to the last paragraph block.
+// Re-parsing rebuilds the blocks from scratch, so the fix-ups have to
+// be replayed after every re-parse.
 function applyLazyFixups(res, fixups) {
   if (fixups.length === 0) return;
   const last = res.blocks[res.blocks.length - 1];
   if (!last || last.t !== 'para') return;
-  const lines = last.text.split('\n');
+  const paraLines = last.text.split('\n');
   let fi = 0;
-  for (let li = 0; li < lines.length && fi < fixups.length; li++) {
-    if (lines[li] === fixups[fi].appended) { lines[li] = fixups[fi].fixed; fi++; }
+  for (let li = 0; li < paraLines.length && fi < fixups.length; li++) {
+    if (paraLines[li] === fixups[fi].appended) {
+      paraLines[li] = fixups[fi].fixed;
+      fi += 1;
+    }
   }
-  last.text = lines.join('\n');
+  last.text = paraLines.join('\n');
 }
 
-// True when the innermost last block (descending into a trailing
-// blockquote or list) is a paragraph or table — a lazy line can extend it.
+// Can a lazy line extend the deepest trailing block? Descend into a
+// trailing blockquote or list; the line can extend it exactly when the
+// innermost last block is a paragraph or a table.
 function deepLastParaTable(blocks) {
   const last = blocks[blocks.length - 1];
   if (!last) return false;
   if (last.t === 'para' || last.t === 'table') return true;
   if (last.t === 'quote') return deepLastParaTable(last.children);
   if (last.t === 'list') {
-    const li = last.items[last.items.length - 1];
-    return li ? deepLastParaTable(li) : false;
+    const lastItem = last.items[last.items.length - 1];
+    return lastItem ? deepLastParaTable(lastItem) : false;
   }
   return false;
 }
@@ -2315,14 +2326,18 @@ function deepLastParaTable(blocks) {
 // per their original columns.
 function stripQuote(line) {
   const b = body(line);
-  let i = 0;
-  while (i < b.length && b[i] === ' ' && i < 3) i++;
-  if (b[i] !== '>') return null;
-  let j = i + 1, col = i + 1;
-  if (b[j] === ' ') { j++; col++; return expandLeadingTabs(b.slice(j), col); }
+  const indent = leadingSpacesUpTo3(b);
+  if (b[indent] !== '>') return null;
+  let j = indent + 1;
+  let col = indent + 1;
+  if (b[j] === ' ') {
+    j += 1;
+    col += 1;
+    return expandLeadingTabs(b.slice(j), col);
+  }
   if (b[j] === '\t') {
-    const w = 4 - (col % 4);
-    return ' '.repeat(w - 1) + expandLeadingTabs(b.slice(j + 1), col + w);
+    const width = 4 - (col % 4);
+    return ' '.repeat(width - 1) + expandLeadingTabs(b.slice(j + 1), col + width);
   }
   return expandLeadingTabs(b.slice(j), col);
 }
@@ -2334,59 +2349,64 @@ function parseBlockquote(lines, i, end, refs) {
     const content = stripQuote(lines[q]);
     if (content === null) break;
     inner.push(content + (hasNL(lines[q]) ? '\n' : ''));
-    q++;
+    q += 1;
   }
   const fixups = [];
-  let res = null;
+  let parsed = null;
   let newChunk = true; // the first lazy line starts a new chunk
-  const ensure = () => {
-    if (!res) { res = parseBlocks(inner, 0, inner.length, refs, false, true); applyLazyFixups(res, fixups); }
-    return res;
+  const ensureParsed = () => {
+    if (parsed === null) {
+      parsed = parseBlocks(inner, 0, inner.length, refs, false, true);
+      applyLazyFixups(parsed, fixups);
+    }
+    return parsed;
   };
-  // lazy continuation lines, and quote lines that follow them (a blank
-  // line ends the blockquote, even when followed by a quote line)
+  // After the directly-quoted lines: further quote lines, and lazy
+  // continuation lines. A blank line ends the blockquote, even when a
+  // quote line follows it.
   while (q < end) {
     const line = lines[q];
     if (isBlank(line)) break;
     const content = stripQuote(line);
     if (content !== null) {
       inner.push(content + (hasNL(line) ? '\n' : ''));
-      q++;
-      res = null;
+      q += 1;
+      parsed = null;
       newChunk = true;
       continue;
     }
     if (isLazyCandidate(line, q, lines, end)) {
-      const r = ensure();
+      const r = ensureParsed();
       if (r.lastNonBlank && deepLastParaTable(r.blocks)) {
         const tail = r.blocks[r.blocks.length - 1];
         if (tail.t === 'para' || tail.t === 'table') {
-          // direct: a lazy line starting a new chunk is dedented (the
-          // indented-code merge); inside a chunk the paragraph regex
-          // swallows it whole, spaces included
+          // Direct case: a lazy line that starts a new chunk is
+          // dedented (the indented-code merge); inside a chunk, the
+          // paragraph pattern swallows it whole, spaces included.
           const appended = lazyAppendBody(body(line), 0);
           if (appended.fix && newChunk) fixups.push(appended.fix);
           inner.push(appended.body + (hasNL(line) ? '\n' : ''));
         } else {
-          // nested blockquote/list: pass the line down unstripped; the
-          // nested level applies its own stripping
+          // A nested blockquote or list: pass the line down unstripped
+          // and let the nested level apply its own stripping.
           inner.push(line);
         }
-        q++;
-        res = null;
+        q += 1;
+        parsed = null;
         newChunk = false;
         continue;
       }
     }
     break;
   }
-  res = ensure();
+  const res = ensureParsed();
   return { block: { t: 'quote', children: res.blocks }, next: q };
 }
 
 // A line may lazily continue a paragraph when it is non-blank and does
-// not start an interrupting block (ATX, fence, thematic break, HTML 1-6,
-// blockquote, list). Setext underlines and table rows are continuations.
+// not itself start an interrupting block (ATX heading, fence, thematic
+// break, HTML types 1-6, blockquote, or an interrupting list). Setext
+// underlines and table rows count as continuations.
 function isLazyCandidate(line, k, lines, end) {
   const b = body(line);
   if (isBlank(line)) return false;
