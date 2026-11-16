@@ -572,13 +572,19 @@ function stripTags(html) {
 /* ---------------- emphasis (delimiter stack) ---------------- */
 
 // Marked's emStrong forward scan, over the delimiter stack: starting
-// from opener O, walk the same-char runs after it and return the stack
-// index where the scan stops (m <= 0), or -1 when it runs out.
-// Uses original run lengths (on): in marked's left-to-right order the
-// scan runs before any pair inside O's range forms, so intermediate
-// runs count at full length even when our closer-first loop already
-// folded them into an inner pair.
-function markedScanStopIndex(delims, oi, text) {
+// from opener O, walk the same-char runs after it the way marked's
+// RDelim regexes classify them and report where the scan stops.
+// Counts use original run lengths (on): in marked's left-to-right
+// order the scan runs before any pair inside O's range forms, so
+// intermediate runs count at full length even when our closer-first
+// loop already folded them into an inner pair.
+// Returns { stop, m, f, b }: stop = stack index where the running
+// total m reached <= 0 (-1 when the scan runs out), m = the total
+// after subtracting the stop run, f = total length of runs the rule
+// of three skipped as mid delimiters, b = original length of the
+// stop run. Marked sizes the closer it consumes as
+// min(b, b + m + f), so m and f matter to whoever forms the pair.
+function markedScan(delims, oi, text) {
   const opener = delims[oi];
   const ch = opener.ch;
   let m = opener.n, f = 0;
@@ -607,14 +613,45 @@ function markedScanStopIndex(delims, oi, text) {
     }
     m -= b;
     if (m > 0) continue;
-    return k;
+    return { stop: k, m, f, b };
   }
-  return -1; // scan ran out without m <= 0: no pair
+  return { stop: -1, m, f, b: 0 }; // scan ran out: no pair
+}
+
+// Stack index where marked's scan from opener oi stops, or -1.
+function markedScanStopIndex(delims, oi, text) {
+  return markedScan(delims, oi, text).stop;
 }
 
 // True when marked's forward scan from opener oi stops exactly at ci.
 function markedScanPairs(delims, oi, ci, text) {
   return markedScanStopIndex(delims, oi, text) === ci;
+}
+
+// True when some fresh opener before stack index oi (but at or after
+// fromStack) would claim closer ci under marked's opener-first order:
+// same char, still able to open at full original length, itself
+// eligible against this closer under the rule of three, and its
+// forward scan stops exactly at ci. One exception: when the claim
+// would consume MORE closer chars than the pair spends on its tags
+// (min(on, on + m + f) > use), the surplus lands inside the pair and
+// can itself close an inner opener — marked pairs `*foo *bar**` as
+// nested ems that way — so the inner candidate must not stand down.
+function earlierOpenerClaims(delims, oi, ci, fromStack, text) {
+  const closer = delims[ci];
+  if (closer.n !== closer.on) return false;
+  for (let j = oi - 1; j >= fromStack; j--) {
+    const e = delims[j];
+    if (!e.active || e.masked || e.ch !== closer.ch || !e.open) continue;
+    if (e.n !== e.on) continue; // only a fresh, untouched opener claims
+    if ((e.close || closer.open) && ((e.n + closer.n) % 3 === 0) && !(e.n % 3 === 0 && closer.n % 3 === 0)) continue;
+    const scan = markedScan(delims, j, text);
+    if (scan.stop !== ci) continue;
+    const bUsed = Math.min(closer.on, closer.on + scan.m + scan.f);
+    const claimUse = (e.n >= 2 && closer.n >= 2) ? 2 : 1;
+    if (bUsed <= claimUse) return true;
+  }
+  return false;
 }
 
 // Process emphasis/strikethrough closers left to right, oldest first.
@@ -654,18 +691,47 @@ function processEmphasis(nodes, delims, fromStack, text) {
           const stop = markedScanStopIndex(delims, oi, text);
           if (stop > ci && delims[stop].n >= 2) { oi--; continue; }
         }
+        // Opener priority, marked style: marked's tokenizer works
+        // opener-first, so when an EARLIER fresh opener's forward
+        // scan stops exactly at this closer, that opener claims the
+        // closer and this candidate must stand down — even when this
+        // candidate's own scan would also stop here. Without this, a
+        // lone inner `*` steals the closing `**` of a strong that
+        // marked forms around it (`**a *b **c**d* e**` keeps its
+        // inner `*`s literal and closes with the final `**`).
+        if (closer.ch !== '~' && earlierOpenerClaims(delims, oi, ci, fromStack, text)) { oi--; continue; }
         opener = d; break;
       }
       oi--;
     }
     if (!opener) { ci++; continue; }
     const use = (opener.n >= 2 && closer.n >= 2) ? 2 : 1;
+    // Marked closer accounting: when marked's forward scan from this
+    // opener stops at this closer, the closer chars it consumes are
+    // min(on, on + m + f) — runs the rule of three skipped as mids
+    // (total f) let the closer contribute MORE chars than the pair
+    // spends on its tags, and marked renders the surplus INSIDE the
+    // pair, at the end of its content. Example: in
+    // `**by command *tool*one***` the scan skips the `*` after "tool"
+    // as a mid, so all three closing chars are consumed and one
+    // stays inside the strong. Apply only when both runs are still
+    // untouched and the opener spends its whole run on the pair, so
+    // the surplus can only land inside, never before the opener.
+    let consume = use, insideTail = '';
+    if (closer.ch !== '~' && opener.n === opener.on && closer.n === closer.on && opener.on === use) {
+      const scan = markedScan(delims, oi, text);
+      if (scan.stop === ci) {
+        const bUsed = Math.min(closer.on, closer.on + scan.m + scan.f);
+        if (bUsed > use) { consume = bUsed; insideTail = closer.ch.repeat(bUsed - use); }
+      }
+    }
     const tag = closer.ch === '~' ? 5 : (use === 2 ? 4 : 3);
     const ni = nodes.indexOf(opener), nj = nodes.indexOf(closer);
     const children = nodes.slice(ni + 1, nj);
+    if (insideTail !== '') children.push(insideTail);
     const wrap = { k: tag, c: children };
     opener.s = opener.s.slice(0, opener.s.length - use); opener.n -= use;
-    closer.s = closer.s.slice(use); closer.n -= use;
+    closer.s = closer.s.slice(consume); closer.n -= consume;
     if (opener.n === 0) opener.active = false;
     if (closer.n === 0) closer.active = false;
     nodes.splice(ni + 1, nj - ni - 1, wrap);
