@@ -1614,31 +1614,31 @@ const BACKPEDAL_D_SET = "?!.,:;*_'\"~)";
 
 function backpedalUrl(s) {
   for (;;) {
-    let m = 0;
+    let cut = 0;
     const n = s.length;
-    while (m < n) {
-      const c = s[m];
+    while (cut < n) {
+      const c = s[cut];
       if (!BACKPEDAL_A_STOP.includes(c)) {
-        while (m < n && !BACKPEDAL_A_STOP.includes(s[m])) m++;
+        while (cut < n && !BACKPEDAL_A_STOP.includes(s[cut])) cut++;
       } else if (c === '(') {
-        let k = m + 1;
-        while (k < n && s[k] !== ')') k++;
-        if (k < n) m = k + 1;
+        let q = cut + 1;
+        while (q < n && s[q] !== ')') q++;
+        if (q < n) cut = q + 1;
         else break;
       } else if (c === '&') {
-        let k = m + 1;
-        while (k < n && isAlnum(s[k])) k++;
-        if (k > m + 1 && k < n && s[k] === ';' && k + 1 === n) break;
-        m++;
+        let q = cut + 1;
+        while (q < n && isAlnum(s[q])) q++;
+        if (q > cut + 1 && q < n && s[q] === ';' && q + 1 === n) break;
+        cut++;
       } else if (BACKPEDAL_D_SET.includes(c)) {
-        let k = m;
-        while (k < n && BACKPEDAL_D_SET.includes(s[k])) k++;
-        if (k < n) m = k;
+        let q = cut;
+        while (q < n && BACKPEDAL_D_SET.includes(s[q])) q++;
+        if (q < n) cut = q;
         else break;
       } else break;
     }
-    if (m === n) return s;
-    s = s.slice(0, m);
+    if (cut === n) return s;
+    s = s.slice(0, cut);
     if (s === '') return '';
   }
 }
@@ -1664,116 +1664,119 @@ function matchExtendedAutolink(text, i, kind, delims) {
   }
   // maximal run of non-space, non-'<' chars ('>' is part of the URL:
   // marked's url regex only stops at whitespace and '<')
-  let j = i;
-  while (j < n && text[j] !== ' ' && text[j] !== '\t' && text[j] !== '\n' && text[j] !== '<') {
-    if (text[j] === ']' && delims) {
-      const nx = text[j + 1];
-      if (nx === '(' || nx === '[' || nx === undefined || nx === ' ' || nx === '\t' || nx === '\n') {
-        let linkClose = false;
-        if (nx === '(' || nx === '[') {
-          linkClose = delims.some((d) => d.link && d.active);
+  let p = i;
+  while (p < n && text[p] !== ' ' && text[p] !== '\t' && text[p] !== '\n' && text[p] !== '<') {
+    if (text[p] === ']' && delims) {
+      const nextCh = text[p + 1];
+      if (nextCh === '(' || nextCh === '[' || nextCh === undefined || nextCh === ' ' || nextCh === '\t' || nextCh === '\n') {
+        let closesLink = false;
+        if (nextCh === '(' || nextCh === '[') {
+          closesLink = delims.some((d) => d.link && d.active);
         } else {
           // only whitespace to the end of the text
-          let k = j + 1;
-          while (k < n && (text[k] === ' ' || text[k] === '\t' || text[k] === '\n')) k++;
-          linkClose = k >= n && delims.some((d) => d.link && d.active);
+          let q = p + 1;
+          while (q < n && (text[q] === ' ' || text[q] === '\t' || text[q] === '\n')) q++;
+          closesLink = q >= n && delims.some((d) => d.link && d.active);
         }
-        if (linkClose) break;
+        if (closesLink) break;
       }
     }
-    j++;
+    p++;
   }
-  let match = backpedalUrl(text.slice(i, j));
-  if (match === '') return null;
+  let url = backpedalUrl(text.slice(i, p));
+  if (url === '') return null;
   // minimal validity: www. needs something after the dot; scheme needs the ://
-  if (kind === 'www' && match.length <= 4) return null;
-  const href = cleanUrl(prefix + match);
+  if (kind === 'www' && url.length <= 4) return null;
+  const href = cleanUrl(prefix + url);
   if (href === null) return null;
   // the href is fully escaped (an '&amp;' in the URL becomes '&amp;amp;'
   // in the href); the visible text is escaped the same way
-  return { node: { k: 6, auto: 'ext', href: escFull(href), title: null, c: [{ k: 8, s: escFull(match), raw: match }] }, next: i + match.length };
+  return { node: { k: 6, auto: 'ext', href: escFull(href), title: null, c: [{ k: 8, s: escFull(url), raw: url }] }, next: i + url.length };
 }
 
-// Inline HTML tag at position `i` (which is '<'). Returns {text, next} or
-// null. Strict grammar per marked's tag regex: tag names are letters +
-// alnum/hyphen, attribute names are [A-Za-z_:][\w.:-]*, each attribute is
-// preceded by whitespace (newlines allowed), quoted values may contain
+// Inline HTML tag at position `i` (which is '<'). Returns {text, next}
+// or null. Strict grammar per marked's tag regex: tag names are letters
+// + alnum/hyphen, attribute names are [A-Za-z_:][\w.:-]*, each attribute
+// is preceded by whitespace (newlines allowed), quoted values may hold
 // '<', '>' and newlines, unquoted values may not contain space "'=<>\`.
 // Comments are <!--> / <!---> / <!--...--> (the latter may run to the
 // end of the text); <?...?>, <!A-Z ...> and <![CDATA[...]]> are tags.
 function tryHtmlTag(text, i) {
   const n = text.length;
   if (text[i] !== '<') return null;
-  let j = i + 1;
+  let p = i + 1;
+  const skipWs = (q) => {
+    while (q < n && (text[q] === ' ' || text[q] === '\t' || text[q] === '\n')) q++;
+    return q;
+  };
   // comment: <!--> | <!---> | <!-- ... --> (or to the end of the text)
   if (text.startsWith('<!--', i)) {
     if (text.startsWith('<!-->', i)) return { text: text.slice(i, i + 5), next: i + 5 };
     if (text.startsWith('<!--->', i)) return { text: text.slice(i, i + 6), next: i + 6 };
-    const end = text.indexOf('-->', i + 4);
-    if (end < 0) return { text: text.slice(i), next: n };
-    return { text: text.slice(i, end + 3), next: end + 3 };
+    const closeAt = text.indexOf('-->', i + 4);
+    if (closeAt < 0) return { text: text.slice(i), next: n };
+    return { text: text.slice(i, closeAt + 3), next: closeAt + 3 };
   }
   // processing instruction <? ... ?>
-  if (text[j] === '?') {
-    const end = text.indexOf('?>', j + 1);
-    if (end < 0) return null;
-    return { text: text.slice(i, end + 2), next: end + 2 };
+  if (text[p] === '?') {
+    const closeAt = text.indexOf('?>', p + 1);
+    if (closeAt < 0) return null;
+    return { text: text.slice(i, closeAt + 2), next: closeAt + 2 };
   }
   // declaration <!A-Z ...> or CDATA
-  if (text[j] === '!') {
+  if (text[p] === '!') {
     if (text.startsWith('<![CDATA[', i)) {
-      const end = text.indexOf(']]>', i + 9);
-      if (end < 0) return null;
-      return { text: text.slice(i, end + 3), next: end + 3 };
+      const closeAt = text.indexOf(']]>', i + 9);
+      if (closeAt < 0) return null;
+      return { text: text.slice(i, closeAt + 3), next: closeAt + 3 };
     }
-    if (j + 1 < n && isLetterCode(text.charCodeAt(j + 1))) {
-      const end = text.indexOf('>', j + 1);
-      if (end < 0) return null;
-      return { text: text.slice(i, end + 1), next: end + 1 };
+    if (p + 1 < n && isLetterCode(text.charCodeAt(p + 1))) {
+      const closeAt = text.indexOf('>', p + 1);
+      if (closeAt < 0) return null;
+      return { text: text.slice(i, closeAt + 1), next: closeAt + 1 };
     }
     return null;
   }
   // closing tag </name>
-  let closing = false;
-  if (text[j] === '/') { closing = true; j++; }
-  if (j >= n || !isLetterCode(text.charCodeAt(j))) return null;
-  while (j < n && isTagNameCode(text.charCodeAt(j))) j++;
-  if (closing) {
-    while (j < n && (text[j] === ' ' || text[j] === '\t' || text[j] === '\n')) j++;
-    if (j < n && text[j] === '>') return { text: text.slice(i, j + 1), next: j + 1 };
+  let isClosing = false;
+  if (text[p] === '/') { isClosing = true; p++; }
+  if (p >= n || !isLetterCode(text.charCodeAt(p))) return null;
+  while (p < n && isTagNameCode(text.charCodeAt(p))) p++;
+  if (isClosing) {
+    p = skipWs(p);
+    if (p < n && text[p] === '>') return { text: text.slice(i, p + 1), next: p + 1 };
     return null;
   }
   // open tag: attributes, each preceded by whitespace (newlines allowed)
-  while (j < n) {
-    if (text[j] === '>') return { text: text.slice(i, j + 1), next: j + 1 };
-    if (text[j] === '/' && text[j + 1] === '>') return { text: text.slice(i, j + 2), next: j + 2 };
-    if (text[j] !== ' ' && text[j] !== '\t' && text[j] !== '\n') return null;
-    while (j < n && (text[j] === ' ' || text[j] === '\t' || text[j] === '\n')) j++;
-    if (j >= n) return null;
-    if (text[j] === '>') return { text: text.slice(i, j + 1), next: j + 1 };
-    if (text[j] === '/' && text[j + 1] === '>') return { text: text.slice(i, j + 2), next: j + 2 };
+  while (p < n) {
+    if (text[p] === '>') return { text: text.slice(i, p + 1), next: p + 1 };
+    if (text[p] === '/' && text[p + 1] === '>') return { text: text.slice(i, p + 2), next: p + 2 };
+    if (text[p] !== ' ' && text[p] !== '\t' && text[p] !== '\n') return null;
+    p = skipWs(p);
+    if (p >= n) return null;
+    if (text[p] === '>') return { text: text.slice(i, p + 1), next: p + 1 };
+    if (text[p] === '/' && text[p + 1] === '>') return { text: text.slice(i, p + 2), next: p + 2 };
     // attribute name
-    if (!isAttrNameCode(text.charCodeAt(j))) return null;
-    j++;
-    while (j < n && isAttrNameCode(text.charCodeAt(j))) j++;
+    if (!isAttrNameCode(text.charCodeAt(p))) return null;
+    p++;
+    while (p < n && isAttrNameCode(text.charCodeAt(p))) p++;
     // optional = value (whitespace allowed around '=')
-    let k = j;
-    while (k < n && (text[k] === ' ' || text[k] === '\t' || text[k] === '\n')) k++;
-    if (text[k] === '=') {
-      k++;
-      while (k < n && (text[k] === ' ' || text[k] === '\t' || text[k] === '\n')) k++;
-      const q = text[k];
-      if (q === '"' || q === "'") {
-        k++;
-        while (k < n && text[k] !== q) k++;
-        if (k >= n) return null;
-        k++;
+    let q = skipWs(p);
+    if (text[q] === '=') {
+      q++;
+      q = skipWs(q);
+      const quote = text[q];
+      if (quote === '"' || quote === "'") {
+        q++;
+        while (q < n && text[q] !== quote) q++;
+        if (q >= n) return null;
+        q++;
       } else {
-        const start = k;
-        while (k < n && isUnquotedAttrCode(text.charCodeAt(k))) k++;
-        if (k === start) return null;
+        const valStart = q;
+        while (q < n && isUnquotedAttrCode(text.charCodeAt(q))) q++;
+        if (q === valStart) return null;
       }
-      j = k;
+      p = q;
     }
     // else: no value; the separator whitespace is consumed by the loop
   }
