@@ -719,10 +719,30 @@ function processEmphasis(nodes, delims, fromStack, text) {
     // the surplus can only land inside, never before the opener.
     let consume = use, insideTail = '';
     if (closer.ch !== '~' && opener.n === opener.on && closer.n === closer.on && opener.on === use) {
-      const scan = markedScan(delims, oi, text);
-      if (scan.stop === ci) {
-        const bUsed = Math.min(closer.on, closer.on + scan.m + scan.f);
-        if (bUsed > use) { consume = bUsed; insideTail = closer.ch.repeat(bUsed - use); }
+      // The scan can only enlarge the closer's contribution when a
+      // rule-of-three mid skip is possible between the pair: a
+      // both-flanking run of the same char in between, or the R flag
+      // (which runs even pure closers through the rule of three).
+      // Skip the scan entirely when neither can occur.
+      let midPossible = false;
+      const pBefore = opener.pos > 0 ? text[opener.pos - 1] : '';
+      const afterOpen = opener.pos + opener.on < text.length ? text[opener.pos + opener.on] : '';
+      if (pBefore !== '' && !isWhitespace(pBefore) &&
+          ((afterOpen !== '' && isUnicodePunct(afterOpen)) ||
+           (closer.ch === '*' && pBefore !== '*' && pBefore !== '_' && !isUnicodePunct(pBefore)))) {
+        midPossible = true;
+      }
+      for (let k = oi + 1; !midPossible && k < ci; k++) {
+        const run = delims[k];
+        if (run.ch === closer.ch && run.open && run.close && !run.masked && !run.link &&
+            !(run.inPairCh !== undefined && run.inPairCh !== closer.ch)) midPossible = true;
+      }
+      if (midPossible) {
+        const scan = markedScan(delims, oi, text);
+        if (scan.stop === ci) {
+          const bUsed = Math.min(closer.on, closer.on + scan.m + scan.f);
+          if (bUsed > use) { consume = bUsed; insideTail = closer.ch.repeat(bUsed - use); }
+        }
       }
     }
     const tag = closer.ch === '~' ? 5 : (use === 2 ? 4 : 3);
