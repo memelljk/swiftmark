@@ -891,77 +891,88 @@ function processEmphasis(nodes, delims, fromStack, text) {
 
 /* ---------------- link resolution ---------------- */
 
-// Read an inline link destination plus an optional title starting at `i`
-// (which must be '('). Returns {dest, title, next} or null.
-function parseInlineLink(text, i) {
+/* ============ link resolution ============ */
+
+// Parse the "(destination "title")" part of an inline link, starting at
+// the '(' at index `at`. On success returns { dest, title, next } with
+// title null when absent; on any malformation returns null.
+function parseInlineLink(text, at) {
   const n = text.length;
-  if (text[i] !== '(') return null;
-  const skipWs = (p) => {
-    while (p < n && (text[p] === ' ' || text[p] === '\t' || text[p] === '\n')) p++;
+  if (text[at] !== '(') return null;
+  const skipInlineWs = (p) => {
+    while (p < n && (text[p] === ' ' || text[p] === '\t' || text[p] === '\n')) p += 1;
     return p;
   };
-  let p = skipWs(i + 1);
+  const isEscapedAt = (p) =>
+    text[p] === '\\' && p + 1 < n && isAsciiPunct(text.charCodeAt(p + 1));
+  let p = skipInlineWs(at + 1);
   if (p >= n) return null;
   let dest = '';
   if (text[p] === '<') {
+    // Angle-bracket destination: everything up to the next '>' on the
+    // same line, with backslash escapes resolved.
     let q = p + 1;
     while (q < n && text[q] !== '\n' && text[q] !== '>') {
-      if (text[q] === '\\' && q + 1 < n && isAsciiPunct(text.charCodeAt(q + 1))) { dest += text[q + 1]; q += 2; }
-      else { dest += text[q]; q++; }
+      if (isEscapedAt(q)) { dest += text[q + 1]; q += 2; }
+      else { dest += text[q]; q += 1; }
     }
     if (q >= n || text[q] !== '>') return null;
     p = q + 1;
   } else {
+    // Bare destination: runs to whitespace or to the ')' that closes
+    // the link, tracking balanced parentheses on the way.
     let depth = 0;
     while (p < n) {
       const c = text[p];
-      if (c === '\\' && p + 1 < n && isAsciiPunct(text.charCodeAt(p + 1))) { dest += text[p + 1]; p += 2; continue; }
+      if (isEscapedAt(p)) { dest += text[p + 1]; p += 2; continue; }
       if (c === ' ' || c === '\t' || c === '\n') break;
-      if (c === '(') depth++;
+      if (c === '(') depth += 1;
       if (c === ')') {
         if (depth === 0) break;
-        depth--;
+        depth -= 1;
       }
-      dest += c; p++;
+      dest += c;
+      p += 1;
     }
   }
-  // optional whitespace, optional title, optional whitespace, ')'
-  // (a title must be preceded by whitespace — otherwise, e.g. after an
-  // angle-bracket destination, the quote belongs to the destination)
-  let q = skipWs(p);
+  // Then: optional whitespace, an optional title, optional whitespace,
+  // and the closing ')'. The title must be preceded by whitespace —
+  // otherwise (say, right after an angle destination) the quote
+  // character belongs to the destination, not to a title.
+  let q = skipInlineWs(p);
   let title = null;
   if (q < n && (text[q] === '"' || text[q] === "'" || text[q] === '(')) {
-    if (q === p) return null; // no whitespace before the title
-    const quote = text[q];
-    const close = quote === '(' ? ')' : quote;
-    let titleText = '', r = q + 1, ok = false;
+    if (q === p) return null; // title with no whitespace before it
+    const opener = text[q];
+    const closer = opener === '(' ? ')' : opener;
+    let collected = '';
+    let r = q + 1;
+    let closed = false;
     while (r < n) {
       const c = text[r];
-      if (c === '\\' && r + 1 < n && isAsciiPunct(text.charCodeAt(r + 1))) { titleText += text[r + 1]; r += 2; continue; }
-      if (c === close) { ok = true; break; }
-      if (c === '\n') {
-        // a newline inside a title is allowed only when the same line also
-        // has content after it is closed later; keep it verbatim
-        titleText += '\n'; r++; continue;
-      }
-      titleText += c; r++;
+      if (isEscapedAt(r)) { collected += text[r + 1]; r += 2; continue; }
+      if (c === closer) { closed = true; break; }
+      collected += c; // a newline inside a title is kept verbatim
+      r += 1;
     }
-    if (!ok) return null;
-    title = titleText;
-    q = skipWs(r + 1);
+    if (!closed) return null;
+    title = collected;
+    q = skipInlineWs(r + 1);
   }
   if (q >= n || text[q] !== ')') return null;
   return { dest, title, next: q + 1 };
 }
 
-// Read a bracketed label starting at `i` ('['). Returns {label, next} or
-// null. Labels do not nest (an unescaped '[' inside is invalid) and end
-// at the first unescaped ']'; backslashes stay verbatim in the label.
-// A newline is allowed unless followed by a blank line.
-function parseLabel(text, i) {
+// Read the bracketed label that starts at the '[' at index `at`.
+// Returns { label, next } or null. Labels do not nest — an unescaped
+// '[' inside invalidates them — and they end at the first unescaped
+// ']'. Backslashes stay verbatim in the returned label. A newline is
+// allowed unless what follows it amounts to a blank line.
+function parseLabel(text, at) {
   const n = text.length;
-  if (text[i] !== '[') return null;
-  let p = i + 1, label = '';
+  if (text[at] !== '[') return null;
+  let p = at + 1;
+  let label = '';
   while (p < n) {
     const c = text[p];
     if (c === '\\' && p + 1 < n) { label += c + text[p + 1]; p += 2; continue; }
@@ -969,23 +980,24 @@ function parseLabel(text, i) {
     if (c === ']') return { label, next: p + 1 };
     if (c === '\n') {
       let q = p + 1;
-      while (q < n && (text[q] === ' ' || text[q] === '\t')) q++;
+      while (q < n && (text[q] === ' ' || text[q] === '\t')) q += 1;
       if (q < n && text[q] === '\n') return null;
-      label += '\n'; p++;
+      label += '\n';
+      p += 1;
       continue;
     }
-    label += c; p++;
+    label += c;
+    p += 1;
   }
   return null;
 }
 
-// True when the children hold a bracket-formed link anywhere inside.
-// Autolinks do not count: a bracket autolink <...> may appear inside
-// link text, and an extended autolink is unlinked below when the outer
-// link forms.
+// Does this node list contain a bracket-formed link anywhere inside?
+// Autolinks are not links for this purpose: a bracket autolink <...>
+// may sit inside link text, and an extended autolink is unlinked (see
+// below) when the outer link forms.
 function containsLink(children) {
-  for (let idx = 0; idx < children.length; idx++) {
-    const node = children[idx];
+  for (const node of children) {
     if (typeof node === 'string' || node.k === undefined) continue;
     if (node.k === 6 && !node.auto) return true;
     if (node.k >= 3 && node.k <= 6 && node.c && containsLink(node.c)) return true;
@@ -993,66 +1005,67 @@ function containsLink(children) {
   return false;
 }
 
-// Extended autolinks (www./scheme://email) do not form inside link
-// text. The inline parser meets them before it knows a link is forming,
-// so when a link does form, turn any extended autolink in its children
-// back into plain text (bracket autolinks <...> stay links).
+// Extended autolinks (www. / scheme:// / email) never form inside link
+// text. The inline scanner meets them before it can know a link is
+// forming, so when a link does form, any extended autolink among its
+// children is demoted back to plain text. Bracket autolinks stay links.
 function unlinkExtAutolinks(children) {
-  const out = [];
+  const kept = [];
   for (const node of children) {
-    if (typeof node === 'string') { out.push(node); continue; }
+    if (typeof node === 'string') { kept.push(node); continue; }
     if (node.k === 6 && node.auto === 'ext') {
-      let raw = '';
+      let rawText = '';
       for (const part of node.c) {
-        if (typeof part === 'string') raw += part;
-        else if (part.raw !== undefined) raw += part.raw;
-        else raw += part.s;
+        if (typeof part === 'string') rawText += part;
+        else if (part.raw !== undefined) rawText += part.raw;
+        else rawText += part.s;
       }
-      out.push(raw);
+      kept.push(rawText);
       continue;
     }
     if ((node.k === 3 || node.k === 4 || node.k === 5 || node.k === 6) && node.c) {
-      out.push({ ...node, c: unlinkExtAutolinks(node.c) });
+      kept.push({ ...node, c: unlinkExtAutolinks(node.c) });
       continue;
     }
-    out.push(node);
+    kept.push(node);
+  }
+  return kept;
+}
+
+// The plain-text reading of inline children, used as image alt text:
+// nested images contribute their own alt, links and emphasis contribute
+// their inner text, code contributes its content, and raw HTML and hard
+// breaks contribute nothing.
+function altTextOf(children) {
+  let out = '';
+  for (const node of children) {
+    if (typeof node === 'string') { out += node; continue; }
+    switch (node.k) {
+      case 0: out += node.s; break;
+      case 1: case 2: break; // raw HTML, hard break: no text
+      case 8: out += node.raw !== undefined ? node.raw : node.s; break;
+      case 9: out += node.s; break;
+      case 'd': out += node.s; break;
+      case 3: case 4: case 5: case 6: out += altTextOf(node.c); break;
+      case 7: out += node.alt; break;
+    }
   }
   return out;
 }
 
-// Plain text of inline children, for image alt text: inner images
-// contribute their alt, links contribute their text, raw HTML and hard
-// breaks contribute nothing, code contributes its text.
-function altTextOf(children) {
-  let text = '';
-  for (const node of children) {
-    if (typeof node === 'string') { text += node; continue; }
-    switch (node.k) {
-      case 0: text += node.s; break;
-      case 1: case 2: break; // raw HTML / hard break: nothing
-      case 8: text += node.raw !== undefined ? node.raw : node.s; break;
-      case 9: text += node.s; break;
-      case 'd': text += node.s; break;
-      case 3: case 4: case 5: case 6: text += altTextOf(node.c); break;
-      case 7: text += node.alt; break;
-    }
-  }
-  return text;
-}
-
-// --- link-label validation (marked's link/reflink label pattern) ---
-// A label is valid when its whole raw text is consumable by these chunks
-// (a hand-written scanner for the same grammar, no regex copy):
-//   [ ... ]  a nested bracket group (inner brackets are one level deep)
+// --- label validation: marked's link/reflink label grammar ---
+// A label is valid when a scanner can consume its whole raw text as a
+// sequence of these chunks (a hand-written scanner for the grammar —
+// no regex is copied):
+//   [ ... ]  a nested bracket group (inner brackets go one level deep)
 //   \x       an escaped character
-//   `...`    a code-span chunk: a maximal backtick run, non-backtick
-//            middle, a maximal backtick run (the first backtick run after
-//            the opener is the closer — the middle cannot hold backticks)
+//   `...`    a code-span chunk: a maximal backtick run, a middle with
+//            no backticks, then the next backtick run (also maximal)
 //   ``+      a run of 2+ backticks immediately before the closing ']'
-//   x        any other single character (not '[', ']', '\', '`')
-// A shortcut reference does NOT use this pattern (its label may hold
-// backticks freely), so this is only applied to inline links and
-// full/collapsed references.
+//   x        any other single character (not '[', ']', '\' or '`')
+// Shortcut references do NOT go through this grammar (their labels may
+// hold backticks freely); it applies to inline links and to full and
+// collapsed references only.
 function validLabel(raw) {
   const n = raw.length;
   let p = 0;
@@ -1066,9 +1079,10 @@ function validLabel(raw) {
       if (p + 1 >= n) return false;
       p += 2;
     } else if (c === '`') {
-      // a run of 2+ backticks reaching the end of the label
+      // A run of 2+ backticks that reaches the end of the label is a
+      // valid final chunk on its own.
       let q = p;
-      while (q < n && raw[q] === '`') q++;
+      while (q < n && raw[q] === '`') q += 1;
       if (q === n && q - p >= 2) return true;
       const after = matchLabelCodeSpan(raw, p);
       if (after < 0) return false;
@@ -1076,36 +1090,38 @@ function validLabel(raw) {
     } else if (c === ']') {
       return false;
     } else {
-      p++;
+      p += 1;
     }
   }
   return true;
 }
 
-// Nested bracket group: '[' + (inner bracket | escaped char |
-// non-bracket char)* + ']'. Returns the index after ']' or -1.
+// Consume a nested bracket group at s[pos]: '[' then any mix of
+// one-level inner groups, escapes and ordinary characters, then ']'.
+// Returns the index just past the ']', or -1.
 function matchLabelBracket(s, pos) {
   let q = pos + 1;
   while (q < s.length) {
     const c = s[q];
     if (c === '[') {
-      const afterInner = matchLabelBracketLe(s, q);
-      if (afterInner < 0) return -1;
-      q = afterInner;
+      const inner = matchLabelBracketLe(s, q);
+      if (inner < 0) return -1;
+      q = inner;
     } else if (c === '\\') {
       if (q + 1 >= s.length) return -1;
       q += 2;
     } else if (c === ']') {
       return q + 1;
     } else {
-      q++;
+      q += 1;
     }
   }
   return -1;
 }
 
-// One-level bracket group (marked's `brackets`): '[' + (escaped char |
-// non-bracket char)* + ']'. Returns the index after ']' or -1.
+// Consume a one-level bracket group (marked's `brackets` alternative):
+// '[' then escapes and non-bracket characters, then ']'. An inner '['
+// rejects it. Returns the index just past the ']', or -1.
 function matchLabelBracketLe(s, pos) {
   let q = pos + 1;
   while (q < s.length) {
@@ -1118,182 +1134,207 @@ function matchLabelBracketLe(s, pos) {
     } else if (c === '[') {
       return -1;
     } else {
-      q++;
+      q += 1;
     }
   }
   return -1;
 }
 
-// Code-span chunk: a maximal backtick run, then non-backtick chars, then
-// the first backtick run after it (also maximal). Returns the index after
-// the closing run, or -1 when there is no closing run.
+// Consume a label code-span chunk at s[pos]: a maximal backtick run, a
+// stretch of non-backtick characters, and the first backtick run after
+// it (again maximal). Returns the index past the closing run, or -1
+// when no closing run exists.
 function matchLabelCodeSpan(s, pos) {
   const n = s.length;
-  let op = pos;
-  while (op < n && s[op] === '`') op++;
-  let mid = op;
-  while (mid < n && s[mid] !== '`') mid++;
-  if (mid >= n) return -1;
-  let cl = mid;
-  while (cl < n && s[cl] === '`') cl++;
-  return cl;
+  let openEnd = pos;
+  while (openEnd < n && s[openEnd] === '`') openEnd += 1;
+  let midEnd = openEnd;
+  while (midEnd < n && s[midEnd] !== '`') midEnd += 1;
+  if (midEnd >= n) return -1;
+  let closeEnd = midEnd;
+  while (closeEnd < n && s[closeEnd] === '`') closeEnd += 1;
+  return closeEnd;
 }
 
-// Ot code span (marked's anyPunctuationOutsideCode code-span alternative):
-// an opening backtick run, content that starts and ends with a
-// non-backtick character (it may hold shorter backtick runs inside —
-// those are what the Ot mask replaces with '+'), and a closing run of
-// the same length not followed by another backtick. Returns the index
-// after the closing run, or -1. This is the code-span grammar the
-// blockSkip mask sees, after the Ot mask has neutralised the inner
-// backticks.
+// Consume an Ot code span (the code-span alternative of marked's
+// anyPunctuationOutsideCode): an opening backtick run; content that
+// begins and ends with a non-backtick character — it may contain
+// shorter backtick runs, exactly the ones the Ot mask rewrites to '+';
+// and a closing run of the same length, not followed by another
+// backtick. Returns the index past the closing run, or -1. This is the
+// code-span grammar the blockSkip mask works with, applied to text the
+// Ot mask has already neutralised.
 function matchOtCodeSpan(s, pos) {
   const n = s.length;
-  let op = pos;
-  while (op < n && s[op] === '`') op++;
-  const len = op - pos;
-  if (len === 0 || op >= n || s[op] === '`') return -1;
-  let q = op;
+  let openEnd = pos;
+  while (openEnd < n && s[openEnd] === '`') openEnd += 1;
+  const runLen = openEnd - pos;
+  if (runLen === 0 || openEnd >= n || s[openEnd] === '`') return -1;
+  let q = openEnd;
   while (q < n) {
-    if (s[q] !== '`') { q++; continue; }
+    if (s[q] !== '`') { q += 1; continue; }
     let runEnd = q;
-    while (runEnd < n && s[runEnd] === '`') runEnd++;
-    if (runEnd - q === len) return runEnd;
+    while (runEnd < n && s[runEnd] === '`') runEnd += 1;
+    if (runEnd - q === runLen) return runEnd;
     q = runEnd;
   }
   return -1;
 }
 
-// True when a label matches marked's blockSkip `link` label grammar (the
-// grammar the emStrong mask sees, on the Ot-masked text): no '[' or ']'
-// inside (the class is [^\[\]] — a nested bracket rejects the whole
-// match), escaped characters, and code spans per matchOtCodeSpan. A label
-// that passes here but fails validLabel (its code span holds a backtick)
-// still masks the emphasis inside it — the link does not form, yet the
-// outer emStrong scan never sees the label's delimiters.
+// Does a label satisfy the blockSkip `link` label grammar — the grammar
+// the emStrong mask sees, applied to Ot-masked text? No '[' or ']' may
+// appear inside (the class is [^\[\]], so a nested bracket rejects the
+// whole match); escapes and code spans (per matchOtCodeSpan) are the
+// only structure. A label can pass here while failing validLabel (when
+// its code span holds a backtick) and still mask the emphasis inside
+// it: the link never forms, yet the outer emStrong scan never sees the
+// label's delimiters.
 function blockSkipLabelOk(raw) {
   const n = raw.length;
   let p = 0;
   while (p < n) {
     const c = raw[p];
     if (c === '[' || c === ']') return false;
-    if (c === '\\') { if (p + 1 >= n) return false; p += 2; continue; }
+    if (c === '\\') {
+      if (p + 1 >= n) return false;
+      p += 2;
+      continue;
+    }
     if (c === '`') {
       const after = matchOtCodeSpan(raw, p);
       if (after < 0) return false;
       p = after;
       continue;
     }
-    p++;
+    p += 1;
   }
   return true;
 }
 
-// Balanced-paren destination after ']( ' (marked's blockSkip `link`
-// dest: one nesting level). text[p] must be '('. Returns the index
-// after the closing ')' or -1.
+// The end of a balanced-paren destination following '](' (the blockSkip
+// `link` destination: one nesting level). text[p] must be '('. Returns
+// the index just past the closing ')', or -1.
 function blockSkipDestEnd(text, p) {
   const n = text.length;
-  let q = p + 1, depth = 0;
+  let q = p + 1;
+  let depth = 0;
   while (q < n) {
     const c = text[q];
     if (c === '\\') { q += 2; continue; }
-    if (c === '(') { if (depth > 0) return -1; depth++; q++; continue; }
+    if (c === '(') {
+      if (depth > 0) return -1;
+      depth += 1;
+      q += 1;
+      continue;
+    }
     if (c === ')') {
       if (depth === 0) return q + 1;
-      depth--; q++; continue;
+      depth -= 1;
+      q += 1;
+      continue;
     }
-    q++;
+    q += 1;
   }
   return -1;
 }
 
-// The Ot mask (marked's anyPunctuationOutsideCode), length-preserving:
-// a code span keeps its delimiter backticks but has the backticks inside
-// its content replaced with '+'; a backslash-escaped punctuation
-// character is replaced with '++'. Positions in the result match the
-// original text, so the blockSkip scan below can run on it directly.
+// The Ot mask (marked's anyPunctuationOutsideCode). It preserves length:
+// a code span keeps its delimiter backticks but has every backtick
+// inside its content replaced with '+', and a backslash-escaped
+// punctuation character becomes '++'. Because positions are preserved,
+// the blockSkip scan below can run on the masked text and report ranges
+// in the original text.
 function otMaskedText(text) {
-  // Fast path: the Ot mask only changes backslash-escaped punctuation
-  // and backticks inside code spans. With neither present it is the
-  // identity — skip the split/join entirely.
+  // Fast path: the mask only ever changes escaped punctuation and
+  // backticks inside code spans. When the text holds neither a backtick
+  // nor a backslash it is the identity — return it untouched.
   if (!text.includes('`') && !text.includes('\\')) return text;
-  const out = text.split('');
-  const n = out.length;
+  const chars = text.split('');
+  const n = chars.length;
   let p = 0;
   while (p < n) {
     if (text[p] === '\\' && p + 1 < n && isAsciiPunct(text.charCodeAt(p + 1))) {
-      out[p] = '+'; out[p + 1] = '+'; p += 2; continue;
+      chars[p] = '+';
+      chars[p + 1] = '+';
+      p += 2;
+      continue;
     }
     if (text[p] === '`') {
-      const end = matchOtCodeSpan(text, p);
-      if (end >= 0) {
-        let op = p;
-        while (op < n && text[op] === '`') op++;
-        const len = op - p;
-        for (let q = op; q < end - len; q++) if (out[q] === '`') out[q] = '+';
-        p = end; continue;
+      const spanEnd = matchOtCodeSpan(text, p);
+      if (spanEnd >= 0) {
+        let openEnd = p;
+        while (openEnd < n && text[openEnd] === '`') openEnd += 1;
+        const runLen = openEnd - p;
+        for (let q = openEnd; q < spanEnd - runLen; q++) {
+          if (chars[q] === '`') chars[q] = '+';
+        }
+        p = spanEnd;
+        continue;
       }
+      // No span here: step over the whole run.
       let q = p;
-      while (q < n && text[q] === '`') q++;
-      p = q; continue;
+      while (q < n && text[q] === '`') q += 1;
+      p = q;
+      continue;
     }
-    p++;
+    p += 1;
   }
-  return out.join('');
+  return chars.join('');
 }
 
-// A blockSkip code-span chunk on the masked text: a maximal backtick run,
-// non-backtick content, and a closing run of the same length (not
-// followed by another backtick — the run is maximal, so that is
-// automatic). Returns the index after the closing run, or -1.
+// Consume a blockSkip code-span chunk on masked text: a maximal
+// backtick run, non-backtick content, and a closing run of the same
+// length (maximality makes "not followed by another backtick"
+// automatic). Returns the index past the closing run, or -1.
 function matchBlockSkipCodeSpan(s, pos) {
   const n = s.length;
-  let op = pos;
-  while (op < n && s[op] === '`') op++;
-  const len = op - pos;
-  if (len === 0) return -1;
-  let q = op;
-  while (q < n && s[q] !== '`') q++;
-  if (q === op || q >= n) return -1;
-  let runEnd = q;
-  while (runEnd < n && s[runEnd] === '`') runEnd++;
-  if (runEnd - q !== len) return -1;
-  return runEnd;
+  let openEnd = pos;
+  while (openEnd < n && s[openEnd] === '`') openEnd += 1;
+  const runLen = openEnd - pos;
+  if (runLen === 0) return -1;
+  let midEnd = openEnd;
+  while (midEnd < n && s[midEnd] !== '`') midEnd += 1;
+  if (midEnd === openEnd || midEnd >= n) return -1;
+  let closeEnd = midEnd;
+  while (closeEnd < n && s[closeEnd] === '`') closeEnd += 1;
+  if (closeEnd - midEnd !== runLen) return -1;
+  return closeEnd;
 }
 
-// A blockSkip `link` match starting at `pos` (s[pos] === '[') on the
-// masked text: '[' + label + '](' + dest + ')'. The label holds no '['
-// or ']' (the class is [^\[\]]) — a ']' that is not followed by '(' and
-// a valid destination rejects the whole match. Returns the index after
-// the closing ')' or -1.
+// Match a whole blockSkip `link` on masked text, starting at the '[' at
+// s[pos]: '[' + label + '](' + dest + ')'. The label holds no '[' or
+// ']' (class [^\[\]]); a ']' that is not followed by '(' and a valid
+// destination rejects the whole match. Returns the index past the
+// destination's ')', or -1.
 function matchBlockSkipLink(s, pos) {
   const n = s.length;
   let q = pos + 1;
   while (q < n) {
-    if (s[q] === '\\') { q += 2; continue; }
-    if (s[q] === '`') {
+    const c = s[q];
+    if (c === '\\') { q += 2; continue; }
+    if (c === '`') {
       const after = matchBlockSkipCodeSpan(s, q);
       if (after < 0) return -1;
-      q = after; continue;
+      q = after;
+      continue;
     }
-    if (s[q] === '[' || s[q] === ']') {
-      if (s[q] === ']' && s[q + 1] === '(') {
+    if (c === '[' || c === ']') {
+      if (c === ']' && s[q + 1] === '(') {
         const afterDest = blockSkipDestEnd(s, q + 1);
         if (afterDest >= 0) return afterDest;
       }
       return -1;
     }
-    q++;
+    q += 1;
   }
   return -1;
 }
 
-// Ranges of the text that marked's emStrong mask replaces (blockSkip:
-// `[label](dest)` links, code spans, HTML tags) — computed on the
-// Ot-masked text, so the ranges are positions in the original text.
+// The ranges of `text` that marked's emStrong mask replaces (blockSkip:
+// `[label](dest)` links, code spans and HTML tags), computed on the
+// Ot-masked text so the ranges are positions in the original.
 // Delimiters inside these ranges are invisible to the outer emphasis
-// scan (they are re-lexed only inside a link that actually forms).
+// scan; they are re-lexed only inside a link that actually forms.
 function blockSkipRanges(text) {
   const masked = otMaskedText(text);
   const n = masked.length;
@@ -1304,49 +1345,54 @@ function blockSkipRanges(text) {
     if (c === '[') {
       const after = matchBlockSkipLink(masked, p);
       if (after >= 0) { spans.push([p, after]); p = after; continue; }
-      p++; continue;
+      p += 1;
+      continue;
     }
     if (c === '`') {
-      if (p > 0 && masked[p - 1] === '`') { p++; continue; }
+      if (p > 0 && masked[p - 1] === '`') { p += 1; continue; }
       const after = matchBlockSkipCodeSpan(masked, p);
       if (after >= 0) { spans.push([p, after]); p = after; continue; }
-      p++; continue;
+      p += 1;
+      continue;
     }
     if (c === '<') {
       if (masked[p + 1] !== ' ') {
         let q = p + 1;
-        while (q < n && masked[q] !== '>' && masked[q] !== '<') q++;
+        while (q < n && masked[q] !== '>' && masked[q] !== '<') q += 1;
         if (q < n && masked[q] === '>') { spans.push([p, q + 1]); p = q + 1; continue; }
       }
-      p++; continue;
+      p += 1;
+      continue;
     }
     if (c === '\\') { p += 2; continue; }
-    p++;
+    p += 1;
   }
   return spans;
 }
 
-// marked's Be(): true when the label (raw text between `start` and `end`
-// in `text`) contains a '<' that starts an HTML tag or autolink
-// extending past the end of the label. Such a label rejects the link
-// outright (inline, reference, and shortcut alike). A '<' inside a code
-// span does not count, and a tag/autolink fully inside the label is
-// skipped.
+// marked's Be() test: does the label (the raw text between `start` and
+// `end` in `text`) contain a '<' that opens an HTML tag or an autolink
+// running PAST the end of the label? Such a label rejects its link
+// outright — inline, reference and shortcut alike. A '<' inside a code
+// span does not count, and a tag or autolink that ends inside the label
+// is simply stepped over.
 function labelHasRunawayTag(text, start, end) {
   const raw = text.slice(start, end);
-  if (!raw.includes('<')) return false;
+  if (raw.indexOf('<') === -1) return false;
   for (let q = 0; q < raw.length; q++) {
-    if (raw[q] === '\\') { q++; continue; }
-    if (raw[q] === '`') {
+    const c = raw[q];
+    if (c === '\\') { q += 1; continue; }
+    if (c === '`') {
       const after = matchLabelCodeSpan(raw, q);
       if (after >= 0) { q = after - 1; continue; }
     }
-    if (raw[q] !== '<') continue;
+    if (c !== '<') continue;
     const at = start + q;
     const tagHit = tryHtmlTag(text, at);
-    const autoHit = tagHit ? null : tryBracketAutolink(text, at);
-    const spanLen = tagHit ? tagHit.next - at : autoHit ? autoHit.next - at : 0;
-    if (spanLen > 0) {
+    const autoHit = tagHit === null ? tryBracketAutolink(text, at) : null;
+    const hit = tagHit || autoHit;
+    if (hit !== null) {
+      const spanLen = hit.next - at;
       if (spanLen > end - at) return true;
       q += spanLen - 1;
     }
@@ -1354,27 +1400,29 @@ function labelHasRunawayTag(text, start, end) {
   return false;
 }
 
-// Would a link form at the ']' at position `j`? Mirrors
-// tryCloseBracketOpener's decision without mutating anything: the
-// nearest active opener, bracket balance, a valid label, and a
-// resolvable destination/reference. Used to stop a code span from
-// swallowing the ']' (the link regex consumes the backticks as a label
-// chunk first).
+// A non-mutating rehearsal of tryCloseBracketOpener's decision: would a
+// link form at the ']' at position j? It needs the nearest active
+// opener, balanced brackets, a label that passes the runaway-tag test
+// (and the label grammar where that applies), and a destination or
+// reference that resolves. The code-span scanner uses this to avoid
+// swallowing a ']' that a link is about to claim (the link pattern
+// consumes the backticks as a label chunk first).
 function wouldFormLink(text, j, delims, refs) {
   let opener = null;
   for (let d = delims.length - 1; d >= 0; d--) {
     if (delims[d].link && delims[d].active) { opener = delims[d]; break; }
   }
-  if (!opener) return false;
-  // bracket balance in the raw text between the opener and this ']':
-  // count unescaped occurrences of one bracket char at a time
-  const countUnescaped = (ch) => {
+  if (opener === null) return false;
+  // Bracket balance over the raw text between the opener and this ']':
+  // count the unescaped occurrences of each bracket character (a
+  // character is escaped when an odd number of backslashes precede it).
+  const countUnescaped = (bracket) => {
     let total = 0;
     for (let k = opener.pos + 1; k < j; k++) {
-      if (text[k] !== ch) continue;
+      if (text[k] !== bracket) continue;
       let slashes = 0;
-      for (let b = k - 1; b >= 0 && text[b] === '\\'; b--) slashes++;
-      if (slashes % 2 === 0) total++;
+      for (let b = k - 1; b >= 0 && text[b] === '\\'; b--) slashes += 1;
+      if (slashes % 2 === 0) total += 1;
     }
     return total;
   };
@@ -1383,60 +1431,59 @@ function wouldFormLink(text, j, delims, refs) {
   if (labelHasRunawayTag(text, opener.pos + 1, j)) return false;
   if (text[j + 1] === '(') {
     if (!validLabel(rawLabel)) {
-      // an inline link with an invalid label falls back to a shortcut
+      // An inline link whose label is invalid falls back to a shortcut.
       return refs.has(normLabel(rawLabel));
     }
-    if (parseInlineLink(text, j + 1)) return true;
+    if (parseInlineLink(text, j + 1) !== null) return true;
     return refs.has(normLabel(rawLabel));
   }
   if (text[j + 1] === '[') {
     if (!validLabel(rawLabel)) return false;
     const lab = parseLabel(text, j + 1);
-    if (!lab) return false;
-    const key = normLabel(lab.label === '' ? rawLabel : lab.label);
-    return refs.has(key);
+    if (lab === null) return false;
+    return refs.has(normLabel(lab.label === '' ? rawLabel : lab.label));
   }
-  // shortcut reference (no label-pattern check: backticks are free here)
+  // Shortcut reference: no label-grammar check — backticks are free here.
   return refs.has(normLabel(rawLabel));
 }
 
-// Attempt to form a link/image at the ']' at position `i`.
-// Returns {next} when a link was formed (nodes/delims updated), else null.
+// Try to form a link or image at the ']' at position i. Every active
+// link opener is tried, nearest first: the ']' closes the opener whose
+// brackets balance with it — the nearest opener may be an inner '['
+// that is merely part of the outer link's text (cm-512:
+// [link [foo [bar]]](/uri) closes the OUTER '['). Returns { next } when
+// a link formed (nodes and delims updated), otherwise null.
 function tryCloseBracket(text, i, nodes, delims, refs) {
-  // try every active link opener, nearest first: the ']' closes the
-  // opener whose brackets balance with it (the nearest opener may be
-  // an inner '[' that is only part of the outer link's text, e.g.
-  // cm-512 [link [foo [bar]]](/uri) closes the OUTER '[')
-  const n = text.length;
   for (let d = delims.length - 1; d >= 0; d--) {
     if (!delims[d].link || !delims[d].active) continue;
     const opener = delims[d];
     const ai = nodes.indexOf(opener);
-    // the ']' only closes the opener when the brackets balance: every
-    // unmatched '[' inside must be matched by a literal ']' inside, so
-    // a ']' that sits inside a nested bracket pair does not close the
-    // outer one (cm-520: the middle ']' of ![[[foo](uri1)](uri2)](uri3)
-    // fails, the last one forms the image with alt '[foo](uri2)')
-    let open = 0, close = 0;
+    // Balance test: every unmatched '[' inside must be matched by a
+    // literal ']' inside, so a ']' sitting inside a nested bracket
+    // pair does not close the outer opener (cm-520: the middle ']' of
+    // ![[[foo](uri1)](uri2)](uri3) fails, and the last one forms the
+    // image with alt '[foo](uri2)').
+    let openCount = 0;
+    let closeCount = 0;
     for (let k = ai + 1; k < nodes.length; k++) {
       const node = nodes[k];
       if (typeof node === 'string') {
-        for (let q = 0; q < node.length; q++) if (node[q] === ']') close++;
+        for (let q = 0; q < node.length; q++) if (node[q] === ']') closeCount += 1;
       } else if (node.k === 'd' && node.link) {
-        open++;
+        openCount += 1;
       }
     }
-    // a ']' produced by a backslash escape (\]) lands in a string node
-    // but is NOT a bracket, so it must not count as a close (cm-194:
-    // [Foo*bar\]] has one escaped ']' in its label)
+    // A ']' produced by a backslash escape (\]) lands in a string node
+    // but is not a bracket, so it must not count as a close (cm-194:
+    // [Foo*bar\]] holds one escaped ']' in its label).
     for (let k = opener.pos + 1; k < i; k++) {
       if (text[k] !== ']') continue;
       let slashes = 0;
-      for (let b = k - 1; b >= 0 && text[b] === '\\'; b--) slashes++;
-      if (slashes % 2 === 1) close--;
+      for (let b = k - 1; b >= 0 && text[b] === '\\'; b--) slashes += 1;
+      if (slashes % 2 === 1) closeCount -= 1;
     }
-    if (open !== close) continue;
-    // a link may not contain another link (an image may contain one)
+    if (openCount !== closeCount) continue;
+    // A link may not contain another link; an image may.
     if (!opener.image && containsLink(nodes.slice(ai + 1))) continue;
     const made = tryCloseBracketOpener(text, i, nodes, delims, opener, refs);
     if (made) return made;
@@ -1444,105 +1491,109 @@ function tryCloseBracket(text, i, nodes, delims, refs) {
   return null;
 }
 
-// Resolve a ']' against one specific opener: inline link, full/collapsed
-// reference, or shortcut reference. Returns the formed node or null.
-// A label holding a '<' that starts a tag/autolink running past the ']'
-// rejects the link outright (marked's Be). An inline link or a full /
-// collapsed reference also needs its label to match the label pattern
-// (validLabel); a shortcut reference does not.
+// Resolve the ']' at i against one specific opener, as an inline link,
+// a full or collapsed reference, or a shortcut reference. Returns
+// { next } or null. A label holding a '<' that starts a tag or autolink
+// running past the ']' rejects the link outright (marked's Be). Inline
+// links and full/collapsed references also need the label to satisfy
+// the label grammar (validLabel); shortcut references do not.
 function tryCloseBracketOpener(text, i, nodes, delims, opener, refs) {
-  const ai = nodes.indexOf(opener);
   const rawLabel = text.slice(opener.pos + 1, i);
   if (labelHasRunawayTag(text, opener.pos + 1, i)) return null;
-  let dest = null, title = null, next = i + 1;
+  let dest = null;
+  let title = null;
+  let next = i + 1;
   if (text[i + 1] === '(') {
     const parsed = parseInlineLink(text, i + 1);
     if (parsed && validLabel(rawLabel)) {
-      dest = parsed.dest; title = parsed.title; next = parsed.next;
+      dest = parsed.dest;
+      title = parsed.title;
+      next = parsed.next;
     } else {
-      // an inline link that fails falls back to a shortcut reference
-      const key = normLabel(rawLabel);
-      const ref = refs.get(key);
+      // A failed inline link falls back to a shortcut reference.
+      const ref = refs.get(normLabel(rawLabel));
       if (!ref) return null;
-      dest = ref.href; title = ref.title;
+      dest = ref.href;
+      title = ref.title;
     }
   } else if (text[i + 1] === '[') {
     if (!validLabel(rawLabel)) return null;
     const labelRef = parseLabel(text, i + 1);
     if (!labelRef) return null;
-    const refLabel = labelRef.label === '' ? null : labelRef.label;
-    // a collapsed reference [] uses the link text as its label — the RAW
-    // source text (backslashes kept), not the resolved inline text
-    const key = normLabel(refLabel === null ? rawLabel : refLabel);
+    // A collapsed reference [] takes the link text as its label — the
+    // RAW source text, backslashes kept, not the resolved inline text.
+    const key = normLabel(labelRef.label === '' ? rawLabel : labelRef.label);
     const ref = refs.get(key);
     if (!ref) return null;
-    dest = ref.href; title = ref.title; next = labelRef.next;
+    dest = ref.href;
+    title = ref.title;
+    next = labelRef.next;
   } else {
-    // a shortcut reference uses the RAW link text as its label
-    const key = normLabel(rawLabel);
-    const ref = refs.get(key);
+    // Shortcut reference: the label is the raw link text.
+    const ref = refs.get(normLabel(rawLabel));
     if (!ref) return null;
-    dest = ref.href; title = ref.title;
+    dest = ref.href;
+    title = ref.title;
   }
   const href = cleanUrl(dest);
   if (href === null) return null;
-  // emphasis inside the link text is resolved before wrapping
+  // Emphasis inside the link text is resolved before wrapping.
   processEmphasis(nodes, delims, delims.indexOf(opener) + 1, text);
-  const ai2 = nodes.indexOf(opener);
-  let children = nodes.slice(ai2 + 1);
-  // extended autolinks do not form inside link text
+  const ai = nodes.indexOf(opener);
+  let children = nodes.slice(ai + 1);
+  // Extended autolinks do not form inside link text.
   if (!opener.image) children = unlinkExtAutolinks(children);
   let node;
   if (opener.image) {
-    const alt = altTextOf(children);
-    node = { k: 7, src: escText(href), title: title === null ? null : escText(title), alt: escText(alt) };
+    node = { k: 7, src: escText(href), title: title === null ? null : escText(title), alt: escText(altTextOf(children)) };
   } else {
     node = { k: 6, href: escText(href), title: title === null ? null : escText(title), c: children };
   }
-  nodes.splice(ai2, nodes.length - ai2, node);
-  // remove opener and everything after it from the delimiter stack
-  const oiPos = delims.indexOf(opener);
-  delims.splice(oiPos);
+  nodes.splice(ai, nodes.length - ai, node);
+  // The opener and everything after it leave the delimiter stack.
+  delims.splice(delims.indexOf(opener));
   if (!opener.image) {
-    // links cannot nest: deactivate earlier LINK openers (image openers
-    // stay active so an outer image can still form)
+    // Links cannot nest: retire every earlier LINK opener. Image
+    // openers stay active, so an outer image can still form.
     for (const cand of delims) if (cand.link && !cand.image) cand.active = false;
   }
   return { next };
 }
 
-// Raw text of the link text between `opener` and the end of `nodes`
-// (numeric refs decoded, escapes resolved — used for reference labels).
+// The raw text of everything between `opener` and the end of `nodes`
+// (references decoded, escapes resolved) — used for reference labels.
+// Differs from nodesTextOf only at the top level, where raw-block nodes
+// (k:9) contribute nothing here.
 function nodesTextBetween(nodes, opener) {
   const ai = nodes.indexOf(opener);
-  let s = '';
+  let out = '';
   for (let k = ai + 1; k < nodes.length; k++) {
     const node = nodes[k];
-    if (typeof node === 'string') { s += node; continue; }
+    if (typeof node === 'string') { out += node; continue; }
     switch (node.k) {
-      case 0: case 1: s += node.s; break;
-      case 8: s += node.raw !== undefined ? node.raw : node.s; break;
-      case 'd': s += node.s; break;
-      case 3: case 4: case 5: case 6: s += nodesTextOf(node.c); break;
-      case 7: s += node.alt; break;
+      case 0: case 1: out += node.s; break;
+      case 8: out += node.raw !== undefined ? node.raw : node.s; break;
+      case 'd': out += node.s; break;
+      case 3: case 4: case 5: case 6: out += nodesTextOf(node.c); break;
+      case 7: out += node.alt; break;
     }
   }
-  return s;
+  return out;
 }
 function nodesTextOf(children) {
-  let s = '';
+  let out = '';
   for (const node of children) {
-    if (typeof node === 'string') { s += node; continue; }
+    if (typeof node === 'string') { out += node; continue; }
     switch (node.k) {
-      case 0: case 1: s += node.s; break;
-      case 8: s += node.raw !== undefined ? node.raw : node.s; break;
-      case 9: s += node.s; break;
-      case 'd': s += node.s; break;
-      case 3: case 4: case 5: case 6: s += nodesTextOf(node.c); break;
-      case 7: s += node.alt; break;
+      case 0: case 1: out += node.s; break;
+      case 8: out += node.raw !== undefined ? node.raw : node.s; break;
+      case 9: out += node.s; break;
+      case 'd': out += node.s; break;
+      case 3: case 4: case 5: case 6: out += nodesTextOf(node.c); break;
+      case 7: out += node.alt; break;
     }
   }
-  return s;
+  return out;
 }
 
 /* ---------------- autolinks ---------------- */
