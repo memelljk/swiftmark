@@ -1,132 +1,151 @@
-// SwiftMark — a CommonMark 0.31.2 + GFM 0.29 parser whose output matches
-// marked 18.1.3 with default options byte for byte. Written from scratch
-// (spec knowledge + differential testing against marked); dependency-free.
+// swiftmark — a from-scratch Markdown engine (CommonMark 0.31.2 plus the
+// GFM 0.29 extensions) tuned so that parse() reproduces, byte for byte,
+// the HTML that marked 18.1.3 produces under its default options. It has
+// no dependencies and imports nothing.
 //
-// Architecture: block parser builds a small tree of block nodes (link
-// reference definitions are collected document-wide first), then a renderer
-// walks the tree and runs the inline parser (delimiter-stack emphasis,
-// links, autolinks) on each text-bearing block.
+// How it is put together: a block-level pass turns the source lines into
+// a tree of block nodes while gathering every link reference definition
+// in the document; a rendering walk then feeds the text of each block
+// through the inline engine (delimiter-stack emphasis, links, autolinks,
+// code spans, raw HTML) and concatenates the resulting HTML.
 
-/* ---------------- helpers: escaping, entities, urls ---------------- */
+/* ============ small utilities: escaping, numeric refs, URLs ============ */
 
-const ESC_FULL_RE = /[&<>"']/g;
-const ESC_TEXT_RE = /[<>"']|&(?!(?:#\d{1,7}|#[Xx][0-9A-Fa-f]{1,6}|\w+);)/g;
+// Both escapers share one replacement table; they differ only in which
+// characters their patterns pick out.
+const ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+const ESCAPE_EVERYWHERE = /[&<>"']/g;
+// In running text the quote/bracket characters always escape, while an
+// ampersand escapes only when it does NOT open a character reference
+// (numeric, or named-looking) — references pass through untouched.
+const ESCAPE_IN_TEXT = /[<>"']|&(?!(?:#\d{1,7}|#[Xx][0-9A-Fa-f]{1,6}|\w+);)/g;
 const NUMREF_RE = /&(?:#([0-9]{1,7})|#[Xx]([0-9A-Fa-f]{1,6}));/g;
 
 function escFull(s) {
-  return s.replace(ESC_FULL_RE, (c) =>
-    c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;');
+  return s.replace(ESCAPE_EVERYWHERE, (ch) => ESCAPE_MAP[ch]);
 }
 
-// Text escaping: < > " ' are always escaped; & is escaped unless it starts
-// a character reference (numeric or named-looking), which is left alone.
 function escText(s) {
-  return s.replace(ESC_TEXT_RE, (c) =>
-    c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;');
+  return s.replace(ESCAPE_IN_TEXT, (ch) => ESCAPE_MAP[ch]);
 }
 
-// Decode a numeric character reference starting at `s[i]` ('&'). Returns
-// [decodedChar, lengthConsumed] or null when it is not a valid numeric ref.
+// Value of one digit character in base 10 or 16; -1 when not a digit.
+function digitValue(code, hex) {
+  if (code >= 48 && code <= 57) return code - 48;
+  if (!hex) return -1;
+  if (code >= 97 && code <= 102) return code - 87;
+  if (code >= 65 && code <= 70) return code - 55;
+  return -1;
+}
+
+// When s[i] opens a numeric character reference (&#...; or &#x...;),
+// return [the decoded string, how many characters it spans]; otherwise
+// return null. Overlong digit runs, a missing semicolon and an empty
+// digit run are all rejected; NUL, surrogates and out-of-range points
+// decode to U+FFFD, matching the HTML rules marked follows.
 function decodeNumRefAt(s, i) {
-  if (s[i] !== '&' || s[i + 1] !== '#') return null;
-  let j = i + 2, hex = false;
-  if (s[j] === 'x' || s[j] === 'X') { hex = true; j++; }
-  const start = j;
-  let cp = 0, digits = 0;
-  while (j < s.length) {
-    const c = s.charCodeAt(j);
-    const d = hex
-      ? (c >= 48 && c <= 57 ? c - 48 : c >= 97 && c <= 102 ? c - 87 : c >= 65 && c <= 70 ? c - 55 : -1)
-      : (c >= 48 && c <= 57 ? c - 48 : -1);
+  if (s.charCodeAt(i) !== 38 || s.charCodeAt(i + 1) !== 35) return null;
+  let pos = i + 2;
+  let hex = false;
+  if (s[pos] === 'x' || s[pos] === 'X') { hex = true; pos += 1; }
+  const base = hex ? 16 : 10;
+  const maxDigits = hex ? 6 : 7;
+  let value = 0;
+  let seen = 0;
+  while (pos < s.length) {
+    const d = digitValue(s.charCodeAt(pos), hex);
     if (d < 0) break;
-    cp = cp * (hex ? 16 : 10) + d;
-    digits++; j++;
-    if (digits > (hex ? 6 : 7)) return null;
+    value = value * base + d;
+    seen += 1;
+    pos += 1;
+    if (seen > maxDigits) return null;
   }
-  if (digits === 0 || j >= s.length || s[j] !== ';') return null;
-  if (cp === 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) cp = 0xFFFD;
-  return [String.fromCodePoint(cp), j + 1 - i];
+  if (seen === 0 || pos >= s.length || s[pos] !== ';') return null;
+  if (value === 0 || value > 0x10FFFF || (value >= 0xD800 && value <= 0xDFFF)) value = 0xFFFD;
+  return [String.fromCodePoint(value), pos + 1 - i];
 }
 
-// marked does not decode named entities at all; only numeric refs are
-// decoded (in text and link text, never inside code spans/blocks).
+// Named entities are never decoded by marked; numeric references are
+// (in text and in link text — but not inside code spans or code blocks).
+// cleanUrl percent-encodes a link destination the way marked does and
+// reports failure (null) for strings encodeURI cannot handle.
 function cleanUrl(href) {
   try {
     return encodeURI(href).replace(/%25/g, '%');
-  } catch (e) {
+  } catch (err) {
     return null;
   }
 }
 
-// Normalising a link label: collapse every whitespace run to a single
-// space, trim the ends, fold case, and expand the few ligatures / sharp-s
-// forms that Unicode case folding maps to plain ASCII letters.
-const LABEL_EXPANSIONS = [
-  ['ß', 'ss'], ['ﬀ', 'ff'], ['ﬁ', 'fi'], ['ﬂ', 'fl'],
-  ['ﬃ', 'ffi'], ['ﬄ', 'ffl'], ['ﬅ', 'st'],
-];
+// Link labels are compared after normalisation: whitespace runs collapse
+// to one space, the ends are trimmed, case is folded, and the handful of
+// ligature / sharp-s characters that Unicode case folding expands into
+// ASCII letters are expanded by hand.
+const LABEL_FOLD_EXPANSIONS = {
+  'ß': 'ss', 'ﬀ': 'ff', 'ﬁ': 'fi', 'ﬂ': 'fl',
+  'ﬃ': 'ffi', 'ﬄ': 'ffl', 'ﬅ': 'st',
+};
 function normLabel(s) {
-  let out = s.replace(/[\s]+/g, ' ').trim().toLowerCase();
-  for (const [from, to] of LABEL_EXPANSIONS) out = out.split(from).join(to);
-  return out;
+  let folded = s.replace(/\s+/g, ' ').trim().toLowerCase();
+  for (const src of Object.keys(LABEL_FOLD_EXPANSIONS)) {
+    if (folded.includes(src)) folded = folded.split(src).join(LABEL_FOLD_EXPANSIONS[src]);
+  }
+  return folded;
 }
 
+// One-character classification by char code. The inline engine leans on
+// these inside its tightest scans, so each is a handful of comparisons —
+// never a regular expression per character.
 function isAsciiPunct(c) {
-  return (c >= 33 && c <= 47) || (c >= 58 && c <= 64) || (c >= 91 && c <= 96) || (c >= 123 && c <= 126);
-}
-// Single-character class tests by code point. parseInline sits on these in
-// its hottest loops, so they are plain comparisons — no regex per char.
-// Email local part: letters, digits, '.', '_', '+', '-'.
-function isEmailLocalCode(c) {
-  if (c === 46 || c === 95 || c === 43 || c === 45) return true;
-  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+  // The four ASCII punctuation ranges: !"#$%&'()*+,-./  :;<=>?@  [\]^_`  {|}~
+  if (c < 33 || c > 126) return false;
+  return c <= 47 || (c >= 58 && c <= 64) || (c >= 91 && c <= 96) || c >= 123;
 }
 function isAlnumCode(c) {
-  if (c >= 97) return c <= 122;
-  if (c >= 65) return c <= 90;
-  return c >= 48 && c <= 57;
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
 }
-function isLetterCode(c) { // [A-Za-z]
-  if (c >= 97) return c <= 122;
-  return c >= 65 && c <= 90;
+function isLetterCode(c) { // A-Z or a-z
+  return (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
 }
-function isTagNameCode(c) { // [A-Za-z0-9-]
-  if (c === 45) return true;
-  return isAlnumCode(c);
+// Characters allowed in the local part of an email autolink beyond the
+// alphanumerics: . _ + -
+function isEmailLocalCode(c) {
+  return isAlnumCode(c) || c === 46 || c === 95 || c === 43 || c === 45;
 }
-function isAttrNameCode(c) { // [\w.:-] = [A-Za-z0-9_.:-]
-  if (c === 95 || c === 46 || c === 58 || c === 45) return true;
-  return isAlnumCode(c);
+function isTagNameCode(c) { // letters, digits and '-'
+  return c === 45 || isAlnumCode(c);
 }
-function isUnquotedAttrCode(c) { // not [ \t\n"'=<>\`]
-  switch (c) {
-    case 32: case 9: case 10: case 34: case 39:
-    case 61: case 60: case 62: case 96:
-      return false;
-    default:
-      return true;
-  }
+function isAttrNameCode(c) { // \w plus . : -
+  return isAlnumCode(c) || c === 95 || c === 46 || c === 58 || c === 45;
 }
-// Characters that always need per-character handling inside parseInline.
+function isUnquotedAttrCode(c) {
+  // An unquoted attribute value stops at whitespace, quotes, '=', '<',
+  // '>' and backtick; everything else is value text.
+  return !(c === 32 || c === 9 || c === 10 || c === 34 || c === 39 ||
+           c === 61 || c === 60 || c === 62 || c === 96);
+}
+// Lookup tables for the two hottest dispatch questions in parseInline:
+// does this character need individual handling, and can this letter open
+// an extended autolink (www. / a scheme / mailto: / xmpp:)?
 const INLINE_SPECIAL = new Uint8Array(128);
-for (const code of [10, 33, 38, 42, 60, 91, 92, 93, 95, 96, 126]) INLINE_SPECIAL[code] = 1; // \n ! & * < [ \ ] _ ` ~
-// Letters that can begin an extended autolink: www. / scheme / mailto: / xmpp:.
+for (const ch of '\n!&*<[\\]_`~') INLINE_SPECIAL[ch.charCodeAt(0)] = 1;
 const TRIGGER_LETTER = new Uint8Array(128);
-for (const code of [72, 70, 102, 104, 109, 119, 120]) TRIGGER_LETTER[code] = 1; // H F f h m w x
+for (const ch of 'HFfhmwx') TRIGGER_LETTER[ch.charCodeAt(0)] = 1;
 function isTriggerLetterCode(c) {
-  return c < 128 && TRIGGER_LETTER[c] === 1;
+  return c < 128 && TRIGGER_LETTER[c] !== 0;
 }
-function isSpaceOrTab(c) { return c === ' ' || c === '\t'; }
+function isSpaceOrTab(c) { return c === 32 || c === 9; }
 function isUnicodePunct(ch) {
-  // CommonMark punctuation is ASCII punctuation plus the Unicode P and S
-  // categories. ASCII input (nearly everything) is decided by the cheap
-  // code check alone; the Unicode regex only runs for non-ASCII chars.
+  // CommonMark counts ASCII punctuation plus the Unicode P and S
+  // categories as punctuation. ASCII (the overwhelming majority) is
+  // settled by the cheap range test; only non-ASCII reaches the regex.
   const code = ch.charCodeAt(0);
   if (code < 128) return isAsciiPunct(code);
   return /[\p{P}\p{S}]/u.test(ch);
 }
+const WHITESPACE_CHARS = ' \t\n\r\f\v\u00a0';
 function isWhitespace(ch) {
-  return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v' || ch === '\u00a0';
+  return WHITESPACE_CHARS.indexOf(ch) !== -1;
 }
 
 /* ---------------- column / tab helpers (lines keep their \n) ---------------- */
