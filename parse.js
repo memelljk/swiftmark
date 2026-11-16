@@ -148,80 +148,96 @@ function isWhitespace(ch) {
   return WHITESPACE_CHARS.indexOf(ch) !== -1;
 }
 
-/* ---------------- column / tab helpers (lines keep their \n) ---------------- */
+/* ============ line and column bookkeeping ============ */
+// The block engine works on physical lines. Every line keeps its own
+// trailing '\n' (the final line of the document may not have one), and
+// indentation is always measured in columns, where a tab advances to
+// the next multiple of four.
 
-// Split source (already \n-normalised) into lines, each keeping its trailing
-// '\n' except possibly the last line.
+// Cut a normalised source into its lines, terminators included.
 function splitLines(src) {
-  if (src === '') return [];
-  const parts = src.split('\n');
   const lines = [];
-  for (let k = 0; k < parts.length - 1; k++) lines.push(parts[k] + '\n');
-  const last = parts[parts.length - 1];
-  if (last !== '') lines.push(last);
+  let from = 0;
+  for (;;) {
+    const nl = src.indexOf('\n', from);
+    if (nl === -1) break;
+    lines.push(src.slice(from, nl + 1));
+    from = nl + 1;
+  }
+  if (from < src.length) lines.push(src.slice(from));
   return lines;
 }
 
+// A line without its terminator.
 function body(line) {
-  return line.charCodeAt(line.length - 1) === 10 ? line.slice(0, -1) : line;
+  return hasNL(line) ? line.slice(0, -1) : line;
 }
 function hasNL(line) { return line.charCodeAt(line.length - 1) === 10; }
+// Blank = nothing but spaces and tabs before the terminator.
 function isBlank(line) {
   const b = body(line);
   for (let i = 0; i < b.length; i++) {
-    const c = b[i];
-    if (c !== ' ' && c !== '\t') return false;
+    const code = b.charCodeAt(i);
+    if (code !== 32 && code !== 9) return false;
   }
   return true;
 }
 
-// Columns of leading whitespace (tab advances to the next multiple of 4).
+// Width in columns of the whitespace run at the start of `b`.
 function indentCols(b) {
   let col = 0;
-  for (let i = 0; i < b.length; i++) {
-    const c = b[i];
-    if (c === ' ') col++;
-    else if (c === '\t') col += 4 - (col % 4);
+  let i = 0;
+  while (i < b.length) {
+    const code = b.charCodeAt(i);
+    if (code === 32) col += 1;
+    else if (code === 9) col += 4 - (col % 4);
     else break;
+    i += 1;
   }
   return col;
 }
 
-// Remove `n` columns of leading whitespace. A tab straddling the boundary
-// leaves spaces for its remainder, and any further leading tabs are
-// expanded to spaces using their ORIGINAL columns (tab stops are relative
-// to the line start, so re-basing them would corrupt the indent).
+// Drop `n` columns of leading whitespace from `b`. When a tab straddles
+// the cut, the part of the tab past the cut survives as spaces; any
+// whitespace after it is expanded too, but measured from the ORIGINAL
+// line start — tab stops belong to the line, so re-basing them after
+// the cut would shift the indent.
 function stripCols(b, n) {
-  let col = 0, i = 0;
+  let col = 0;
+  let i = 0;
   while (i < b.length && col < n) {
-    const c = b[i];
-    if (c === ' ') { col++; i++; }
-    else if (c === '\t') {
-      const w = 4 - (col % 4);
-      if (col + w <= n) { col += w; i++; }
-      else {
-        let out = ' '.repeat(col + w - n);
-        let cc = col + w; // original column just past this tab
-        let j = i + 1;
-        while (j < b.length && (b[j] === ' ' || b[j] === '\t')) {
-          if (b[j] === ' ') { out += ' '; cc++; j++; }
-          else { const w2 = 4 - (cc % 4); out += ' '.repeat(w2); cc += w2; j++; }
-        }
-        return out + b.slice(j);
-      }
-    } else break;
+    const ch = b[i];
+    if (ch === ' ') { col += 1; i += 1; continue; }
+    if (ch !== '\t') break;
+    const width = 4 - (col % 4);
+    if (col + width <= n) { col += width; i += 1; continue; }
+    // Straddling tab: emit its remainder, then expand the rest of the
+    // leading whitespace run at its original columns.
+    let out = ' '.repeat(col + width - n);
+    let origCol = col + width;
+    let j = i + 1;
+    while (j < b.length && (b[j] === ' ' || b[j] === '\t')) {
+      if (b[j] === ' ') { out += ' '; origCol += 1; j += 1; }
+      else { const w2 = 4 - (origCol % 4); out += ' '.repeat(w2); origCol += w2; j += 1; }
+    }
+    return out + b.slice(j);
   }
   return b.slice(i);
 }
 
-// Expand leading tabs of `s` to spaces, tracking columns from `col`.
+// Rewrite the leading whitespace of `s` with every tab expanded to
+// spaces, counting columns from `col`.
 function expandLeadingTabs(s, col) {
-  let out = '', i = 0;
+  let out = '';
+  let i = 0;
   while (i < s.length) {
-    const c = s[i];
-    if (c === '\t') { const w = 4 - (col % 4); out += ' '.repeat(w); col += w; i++; }
-    else if (c === ' ') { out += ' '; col++; i++; }
-    else break;
+    const ch = s[i];
+    if (ch === ' ') { out += ' '; col += 1; i += 1; continue; }
+    if (ch !== '\t') break;
+    const width = 4 - (col % 4);
+    out += ' '.repeat(width);
+    col += width;
+    i += 1;
   }
   return out + s.slice(i);
 }
