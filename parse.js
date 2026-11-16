@@ -1794,8 +1794,8 @@ const BLOCK_TAGS = new Set(('address article aside base basefont blockquote body
 function parseBlocks(lines, start, end, refs, tight, stripAtEnd, inList) {
   const blocks = [];
   let blankBetween = false;
-  let i = start;
   let pendingBlank = false;
+  let i = start;
   while (i < end) {
     if (isBlank(lines[i])) { pendingBlank = true; i++; continue; }
     if (pendingBlank && blocks.length > 0) blankBetween = true;
@@ -1825,17 +1825,14 @@ function parseBlocks(lines, start, end, refs, tight, stripAtEnd, inList) {
     // block start, so it is code)
     if (indentCols(b) >= 4) { const r = parseIndentedCode(lines, i, end); blocks.push(r.block); i = r.next; continue; }
     // paragraph / table / link-reference definitions
-    const r = parseParagraph(lines, i, end, refs, stripAtEnd, inList);
+    const r = parseParagraph(lines, i, end, refs,
+      stripAtEnd, inList);
     if (r.block) blocks.push(r.block);
     i = r.next;
   }
-  const last = blocks[blocks.length - 1];
-  const lastNonBlank = end > start && !isBlank(lines[end - 1]);
-  return {
-    blocks, blankBetween,
-    lastKind: last ? last.t : null,
-    lastNonBlank,
-  };
+  const tail = blocks[blocks.length - 1];
+  const endsWithText = end > start && !isBlank(lines[end - 1]);
+  return { blocks, blankBetween, lastKind: tail ? tail.t : null, lastNonBlank: endsWithText };
 }
 
 function joinParaLines(ls) {

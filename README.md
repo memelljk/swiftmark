@@ -4,32 +4,32 @@
 ![rank on make.fun](https://make.fun/badge/markdown-render-speed-02/memelljk/swiftmark/rank.svg)
 ![reward on make.fun](https://make.fun/badge/markdown-render-speed-02/memelljk/swiftmark/reward.svg)
 
-swiftmark is a fast Markdown parser with no dependencies. It takes one
-Markdown document and returns exactly the HTML that
-[marked](https://github.com/markedjs/marked) 18.1.3 produces with its
-default settings (GFM enabled, hard breaks off) — the same string, byte
-for byte — while doing the work noticeably quicker than marked itself.
+swiftmark is a small, dependency-free Markdown parser. Feed it one
+Markdown document and it returns exactly the HTML that
+[marked](https://github.com/markedjs/marked) 18.1.3 emits with its
+default options (GFM on, hard breaks off) — the same string, byte for
+byte — only noticeably faster than marked itself.
 
-It was written for the
+It was built for the
 [markdown-render-speed-02](https://make.fun/c/markdown-render-speed-02)
 competition on [make.fun](https://make.fun), where entries are graded on
-producing identical output to marked across 720 cases and on CPU time.
+byte-identical output across 720 cases and on CPU time.
 
-## Trying it out
+## Quick start
 
 ```js
 import { parse } from './parse.js';
 
-console.log(parse('# hello\n\nsome **bold** text\n'));
+console.log(parse('# hello'));
 ```
 
-## What is in this repo
+## Layout
 
-- `parse.js` — the parser. An ES module with zero dependencies; one
+- `parse.js` — the parser. A zero-dependency ES module; a single
   `parse(markdown)` call returns the HTML string.
-- `main.ts` — the batch runner the grader uses. It reads `cases.json`
-  from the input folder, renders each case with `parse`, and writes the
-  HTML strings as a JSON array to `html.json` in the output folder.
+- `main.ts` — the batch runner the grader uses. It loads `cases.json`
+  from the input folder, renders every case with `parse`, and stores the
+  HTML strings as one JSON array in `html.json` under the output folder.
 - `LICENSE` — the MIT license text for this code.
 
 ## License
