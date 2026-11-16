@@ -2451,30 +2451,30 @@ function parseList(lines, i, end, refs) {
 // backslashes is an escaped literal pipe; an even number means the pipe
 // splits the row. Leading/trailing pipes are dropped (same parity rule).
 function splitTableRow(b) {
-  let s = b.trim();
-  if (s.startsWith('|')) s = s.slice(1);
-  if (s.endsWith('|')) {
-    let n = 0;
-    for (let k = s.length - 2; k >= 0 && s[k] === '\\'; k--) n++;
-    if (n % 2 === 0) s = s.slice(0, -1);
+  let row = b.trim();
+  if (row.startsWith('|')) row = row.slice(1);
+  if (row.endsWith('|')) {
+    let slashes = 0;
+    for (let p = row.length - 2; p >= 0 && row[p] === '\\'; p--) slashes++;
+    if (slashes % 2 === 0) row = row.slice(0, -1);
   }
   const cells = [];
-  let cur = '';
-  for (let k = 0; k < s.length; k++) {
-    const c = s[k];
+  let cell = '';
+  for (let p = 0; p < row.length; p++) {
+    const c = row[p];
     if (c === '\\') {
-      let n = 0;
-      while (k + n < s.length && s[k + n] === '\\') n++;
-      if (k + n < s.length && s[k + n] === '|') {
-        if (n % 2 === 1) { cur += '\\'.repeat(n - 1) + '|'; k += n; continue; }
-        cur += '\\'.repeat(n); k += n - 1; continue;
+      let slashes = 0;
+      while (p + slashes < row.length && row[p + slashes] === '\\') slashes++;
+      if (p + slashes < row.length && row[p + slashes] === '|') {
+        if (slashes % 2 === 1) { cell += '\\'.repeat(slashes - 1) + '|'; p += slashes; continue; }
+        cell += '\\'.repeat(slashes); p += slashes - 1; continue;
       }
-      cur += '\\'.repeat(n); k += n - 1; continue;
+      cell += '\\'.repeat(slashes); p += slashes - 1; continue;
     }
-    if (c === '|') { cells.push(cur.trim()); cur = ''; continue; }
-    cur += c;
+    if (c === '|') { cells.push(cell.trim()); cell = ''; continue; }
+    cell += c;
   }
-  cells.push(cur.trim());
+  cells.push(cell.trim());
   return cells;
 }
 
@@ -2483,9 +2483,9 @@ function parseDelimiterRow(b) {
   const cells = splitTableRow(b);
   const aligns = [];
   for (const cell of cells) {
-    const m = /^(:?)-+(:?)$/.exec(cell);
-    if (!m) return null;
-    aligns.push(m[1] === ':' && m[2] === ':' ? 'center' : m[1] === ':' ? 'left' : m[2] === ':' ? 'right' : null);
+    const hit = /^(:?)-+(:?)$/.exec(cell);
+    if (!hit) return null;
+    aligns.push(hit[1] === ':' && hit[2] === ':' ? 'center' : hit[1] === ':' ? 'left' : hit[2] === ':' ? 'right' : null);
   }
   return aligns;
 }
@@ -2520,54 +2520,54 @@ function isTableHeader(b1, b2) {
 // so a line of <=3 spaces + a trailing tab is a row, not a table end.
 function isTableBlankRow(b) {
   if (!b) return false;
-  let sp = 0;
-  while (sp < b.length && b[sp] === ' ') sp++;
-  if (sp === b.length) return false; // spaces-only: blank
-  if (sp >= 4) return false; // 4-space indent: code
-  return sp + 1 === b.length; // tab must be the last character
+  let spaces = 0;
+  while (spaces < b.length && b[spaces] === ' ') spaces++;
+  if (spaces === b.length) return false; // spaces-only: blank
+  if (spaces >= 4) return false; // 4-space indent: code
+  return spaces + 1 === b.length; // tab must be the last character
 }
 
 function parseTable(lines, i, end) {
   const head = splitTableRow(body(lines[i]));
   const aligns = parseDelimiterRow(body(lines[i + 1]));
   const rows = [];
-  let j = i + 2;
-  while (j < end) {
-    const line = lines[j];
+  let q = i + 2;
+  while (q < end) {
+    const line = lines[q];
     if (isBlank(line)) {
-      if (isTableBlankRow(body(line))) { rows.push(splitTableRow(body(line))); j++; continue; }
+      if (isTableBlankRow(body(line))) { rows.push(splitTableRow(body(line))); q++; continue; }
       break;
     }
-    const b = body(line);
-    if (indentCols(b) >= 4) break;
-    if (matchATX(b) || matchFencedStart(b) || isThematicBreak(b)) break;
-    if (htmlBlockType(b, true) > 0) break;
+    const rowBody = body(line);
+    if (indentCols(rowBody) >= 4) break;
+    if (matchATX(rowBody) || matchFencedStart(rowBody) || isThematicBreak(rowBody)) break;
+    if (htmlBlockType(rowBody, true) > 0) break;
     if (stripQuote(line) !== null) break;
-    const lst = matchListStart(b);
-    if (lst && listInterruptsPara(lst, b)) break;
-    rows.push(splitTableRow(b));
-    j++;
+    const marker = matchListStart(rowBody);
+    if (marker && listInterruptsPara(marker, rowBody)) break;
+    rows.push(splitTableRow(rowBody));
+    q++;
   }
   for (const row of rows) {
     while (row.length < head.length) row.push('');
     if (row.length > head.length) row.length = head.length;
   }
-  return { block: { t: 'table', align: aligns, head, rows }, next: j };
+  return { block: { t: 'table', align: aligns, head, rows }, next: q };
 }
 
 /* --- paragraph, setext, link-reference definitions --- */
 
 function setextLevel(b) {
-  let i = 0;
-  while (i < b.length && b[i] === ' ' && i < 3) i++;
-  if (i >= b.length) return 0;
-  const ch = b[i];
-  if (ch !== '=' && ch !== '-') return 0;
-  let j = i;
-  while (j < b.length && b[j] === ch) j++;
-  while (j < b.length && (b[j] === ' ' || b[j] === '\t')) j++;
-  if (j !== b.length) return 0;
-  return ch === '=' ? 1 : 2;
+  let p = 0;
+  while (p < b.length && b[p] === ' ' && p < 3) p++;
+  if (p >= b.length) return 0;
+  const mark = b[p];
+  if (mark !== '=' && mark !== '-') return 0;
+  let q = p;
+  while (q < b.length && b[q] === mark) q++;
+  while (q < b.length && (b[q] === ' ' || b[q] === '\t')) q++;
+  if (q !== b.length) return 0;
+  return mark === '=' ? 1 : 2;
 }
 
 // Try to parse a link-reference definition starting at lines[i].
@@ -2577,89 +2577,89 @@ function setextLevel(b) {
 function tryDef(lines, i, end) {
   // join the following non-blank lines into one string to parse
   const parts = [];
-  let k = i;
-  while (k < end && !isBlank(lines[k]) && parts.length < 50) { parts.push(body(lines[k])); k++; }
+  let q = i;
+  while (q < end && !isBlank(lines[q]) && parts.length < 50) { parts.push(body(lines[q])); q++; }
   if (parts.length === 0) return null;
   const s = parts.join('\n');
-  const lineStart = [0];
-  for (let m = 0; m < parts.length; m++) lineStart.push(lineStart[m] + parts[m].length + 1);
-  const lineOf = (off) => {
-    let m = 0;
-    while (m + 1 < lineStart.length && lineStart[m + 1] <= off) m++;
-    return m;
+  const starts = [0];
+  for (let r = 0; r < parts.length; r++) starts.push(starts[r] + parts[r].length + 1);
+  const lineAt = (off) => {
+    let r = 0;
+    while (r + 1 < starts.length && starts[r + 1] <= off) r++;
+    return r;
   };
   let p = 0;
   while (p < s.length && s[p] === ' ' && p < 3) p++;
   if (s[p] !== '[') return null;
-  const lab = parseLabel(s, p);
-  if (!lab) return null;
-  const label = lab.label;
+  const labelMatch = parseLabel(s, p);
+  if (!labelMatch) return null;
+  const label = labelMatch.label;
   if (label === '' || normLabel(label) === '') return null;
-  let j = lab.next;
+  let cur = labelMatch.next;
   // ']' must be followed immediately by ':' (no whitespace between)
-  if (s[j] !== ':') return null;
-  j++;
+  if (s[cur] !== ':') return null;
+  cur++;
   // spaces only (no tab) before the destination; it may be on the next
   // line (newline + spaces/tabs)
-  while (j < s.length && s[j] === ' ') j++;
-  if (j < s.length && s[j] === '\n') {
-    j++;
-    while (j < s.length && (s[j] === ' ' || s[j] === '\t')) j++;
+  while (cur < s.length && s[cur] === ' ') cur++;
+  if (cur < s.length && s[cur] === '\n') {
+    cur++;
+    while (cur < s.length && (s[cur] === ' ' || s[cur] === '\t')) cur++;
   }
-  if (j >= s.length) return null;
+  if (cur >= s.length) return null;
   let dest = '';
-  if (s[j] === '<') {
-    let m = j + 1;
-    while (m < s.length && s[m] !== '\n' && s[m] !== '>') {
-      if (s[m] === '\\' && m + 1 < s.length && isAsciiPunct(s.charCodeAt(m + 1))) { dest += s[m + 1]; m += 2; }
-      else { dest += s[m]; m++; }
+  if (s[cur] === '<') {
+    let r = cur + 1;
+    while (r < s.length && s[r] !== '\n' && s[r] !== '>') {
+      if (s[r] === '\\' && r + 1 < s.length && isAsciiPunct(s.charCodeAt(r + 1))) { dest += s[r + 1]; r += 2; }
+      else { dest += s[r]; r++; }
     }
-    if (m >= s.length || s[m] !== '>') return null;
-    j = m + 1;
+    if (r >= s.length || s[r] !== '>') return null;
+    cur = r + 1;
   } else {
-    let m = j, depth = 0;
-    while (m < s.length) {
-      const c = s[m];
-      if (c === '\\' && m + 1 < s.length && isAsciiPunct(s.charCodeAt(m + 1))) { dest += s[m + 1]; m += 2; continue; }
+    let r = cur, depth = 0;
+    while (r < s.length) {
+      const c = s[r];
+      if (c === '\\' && r + 1 < s.length && isAsciiPunct(s.charCodeAt(r + 1))) { dest += s[r + 1]; r += 2; continue; }
       if (c === ' ' || c === '\t' || c === '\n') break;
       if (c === '(') depth++;
       if (c === ')') { if (depth === 0) break; depth--; }
-      dest += c; m++;
+      dest += c; r++;
     }
     if (dest === '' || depth !== 0) return null;
-    j = m;
+    cur = r;
   }
   // optional title (must be preceded by whitespace)
   let title = null;
-  let tj = j, sawWs = false;
-  while (tj < s.length && (s[tj] === ' ' || s[tj] === '\t')) { tj++; sawWs = true; }
-  if (tj < s.length && s[tj] === '\n') {
-    tj++;
-    while (tj < s.length && (s[tj] === ' ' || s[tj] === '\t')) tj++;
-    sawWs = true;
+  let tq = cur, sawSpace = false;
+  while (tq < s.length && (s[tq] === ' ' || s[tq] === '\t')) { tq++; sawSpace = true; }
+  if (tq < s.length && s[tq] === '\n') {
+    tq++;
+    while (tq < s.length && (s[tq] === ' ' || s[tq] === '\t')) tq++;
+    sawSpace = true;
   }
-  if (sawWs && tj < s.length && (s[tj] === '"' || s[tj] === "'" || s[tj] === '(')) {
-    const q = s[tj];
-    const close = q === '(' ? ')' : q;
-    let t = '', m = tj + 1, ok = false;
-    while (m < s.length) {
-      const c = s[m];
-      if (c === '\\' && m + 1 < s.length && isAsciiPunct(s.charCodeAt(m + 1))) { t += s[m + 1]; m += 2; continue; }
-      if (c === close) { ok = true; break; }
-      t += c; m++;
+  if (sawSpace && tq < s.length && (s[tq] === '"' || s[tq] === "'" || s[tq] === '(')) {
+    const quote = s[tq];
+    const closer = quote === '(' ? ')' : quote;
+    let titleText = '', r = tq + 1, ok = false;
+    while (r < s.length) {
+      const c = s[r];
+      if (c === '\\' && r + 1 < s.length && isAsciiPunct(s.charCodeAt(r + 1))) { titleText += s[r + 1]; r += 2; continue; }
+      if (c === closer) { ok = true; break; }
+      titleText += c; r++;
     }
     if (ok) {
       // only whitespace may follow the closing quote on its line
-      let e = m + 1;
-      while (e < s.length && (s[e] === ' ' || s[e] === '\t')) e++;
-      if (e >= s.length || s[e] === '\n') { title = t; j = e; }
+      let tail = r + 1;
+      while (tail < s.length && (s[tail] === ' ' || s[tail] === '\t')) tail++;
+      if (tail >= s.length || s[tail] === '\n') { title = titleText; cur = tail; }
     }
   }
   // after dest/title, only spaces may remain, then a newline or the end
-  let e = j;
-  while (e < s.length && (s[e] === ' ' || s[e] === '\t')) e++;
-  if (e < s.length && s[e] !== '\n') return null;
-  return { label, href: dest, title, next: i + lineOf(e) + 1 };
+  let tail = cur;
+  while (tail < s.length && (s[tail] === ' ' || s[tail] === '\t')) tail++;
+  if (tail < s.length && s[tail] !== '\n') return null;
+  return { label, href: dest, title, next: i + lineAt(tail) + 1 };
 }
 
 // True when a setext heading may not form over lines[j..k): some content
@@ -2667,8 +2667,8 @@ function tryDef(lines, i, end) {
 // restriction). The table pattern here requires a pipe — a bare '---'
 // delimiter line does not block.
 function setextBlocked(lines, j, k) {
-  for (let m = j + 1; m < k; m++) {
-    const b = body(lines[m]);
+  for (let r = j + 1; r < k; r++) {
+    const b = body(lines[r]);
     if (matchATX(b) || matchFencedStart(b) || isThematicBreak(b)) return true;
     if (/^ {0,3}<[^\n>]+>/.test(b)) return true;
     if (stripQuoteText(b) !== null) return true;
@@ -2682,62 +2682,62 @@ function setextBlocked(lines, j, k) {
 }
 
 function parseParagraph(lines, i, end, refs, inner, inList) {
-  let j = i;
+  let q = i;
   // leading link-reference definitions
-  while (j < end) {
-    const def = tryDef(lines, j, end);
+  while (q < end) {
+    const def = tryDef(lines, q, end);
     if (!def) break;
     if (!refs.has(normLabel(def.label))) refs.set(normLabel(def.label), { href: def.href, title: def.title });
-    j = def.next;
+    q = def.next;
   }
-  if (j >= end || isBlank(lines[j])) return { block: null, next: j };
-  const firstB = body(lines[j]);
+  if (q >= end || isBlank(lines[q])) return { block: null, next: q };
+  const firstLine = body(lines[q]);
   // a table may start the paragraph position
-  if (j + 1 < end && isTableHeader(firstB, body(lines[j + 1]))) {
-    const t = parseTable(lines, j, end);
-    return { block: t.block, next: t.next };
+  if (q + 1 < end && isTableHeader(firstLine, body(lines[q + 1]))) {
+    const table = parseTable(lines, q, end);
+    return { block: table.block, next: table.next };
   }
-  if (startsInterruptBlock(firstB, inList)) return { block: null, next: j };
+  if (startsInterruptBlock(firstLine, inList)) return { block: null, next: q };
   const paraLines = [];
-  let k = j;
-  while (k < end) {
-    const b = body(lines[k]);
-    if (isBlank(lines[k])) {
+  let r = q;
+  while (r < end) {
+    const b = body(lines[r]);
+    if (isBlank(lines[r])) {
       // a whitespace-only line is a continuation only when it is the last
       // line of the range and has no trailing newline (an inner/container
       // range's text has no trailing newline, so its last line qualifies).
       // A truly empty line never counts.
-      if (k === end - 1 && paraLines.length > 0 && body(lines[k]) !== '' && (!hasNL(lines[k]) || inner)) {
-        paraLines.push(lines[k]);
-        k++;
+      if (r === end - 1 && paraLines.length > 0 && body(lines[r]) !== '' && (!hasNL(lines[r]) || inner)) {
+        paraLines.push(lines[r]);
+        r++;
       }
       break;
     }
     if (paraLines.length > 0) {
-      const st = setextLevel(b);
-      if (st && !setextBlocked(lines, j, k)) {
+      const level = setextLevel(b);
+      if (level && !setextBlocked(lines, q, r)) {
         // a setext heading's content is the paragraph text trimmed
-        const txt = joinParaLines(paraLines).replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
-        return { block: { t: 'head', level: st, text: txt }, next: k + 1 };
+        const headingText = joinParaLines(paraLines).replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
+        return { block: { t: 'head', level, text: headingText }, next: r + 1 };
       }
-      if (k + 1 < end && isTableCandidate(b, body(lines[k + 1]))) {
+      if (r + 1 < end && isTableCandidate(b, body(lines[r + 1]))) {
         // a table header candidate stops the paragraph — unless the
         // delimiter line is a setext underline for the paragraph
         // including this line
-        const nb = body(lines[k + 1]);
-        if (setextLevel(nb) > 0 && !setextBlocked(lines, j, k + 1)) {
-          paraLines.push(lines[k]);
-          k++;
+        const nextLine = body(lines[r + 1]);
+        if (setextLevel(nextLine) > 0 && !setextBlocked(lines, q, r + 1)) {
+          paraLines.push(lines[r]);
+          r++;
           continue;
         }
         break;
       }
       if (startsInterruptBlock(b, inList)) break;
     }
-    paraLines.push(lines[k]);
-    k++;
+    paraLines.push(lines[r]);
+    r++;
   }
-  return { block: { t: 'para', text: joinParaLines(paraLines) }, next: k };
+  return { block: { t: 'para', text: joinParaLines(paraLines) }, next: r };
 }
 
 // True when the line starts a block that interrupts a paragraph.
@@ -2747,15 +2747,15 @@ function startsInterruptBlock(b, inList) {
   if (isThematicBreak(b)) return true;
   if (htmlBlockType(b, true) > 0) return true;
   if (stripQuoteText(b) !== null) return true;
-  const lst = matchListStart(b);
-  if (lst && listInterruptsPara(lst, b, inList)) return true;
+  const marker = matchListStart(b);
+  if (marker && listInterruptsPara(marker, b, inList)) return true;
   return false;
 }
 
 function stripQuoteText(b) {
-  let i = 0;
-  while (i < b.length && b[i] === ' ' && i < 3) i++;
-  return b[i] === '>' ? b.slice(i + 1) : null;
+  let p = 0;
+  while (p < b.length && b[p] === ' ' && p < 3) p++;
+  return b[p] === '>' ? b.slice(p + 1) : null;
 }
 
 /* ---------------- rendering ---------------- */
@@ -2774,7 +2774,11 @@ function renderBlocks(blocks, refs, tight) {
         break;
       case 'code': {
         // code text renders with exactly one trailing '\n' (none when empty)
-        const ct = b.text === '' ? '' : (b.text.charCodeAt(b.text.length - 1) === 10 ? b.text.slice(0, -1) : b.text) + '\n';
+        let ct = b.text;
+        if (ct !== '') {
+          if (ct.charCodeAt(ct.length - 1) === 10) ct = ct.slice(0, -1);
+          ct += '\n';
+        }
         out += b.lang !== null
           ? '<pre><code class="language-' + escText(b.lang) + '">' + escFull(ct) + '</code></pre>\n'
           : '<pre><code>' + escFull(ct) + '</code></pre>\n';
@@ -2799,19 +2803,19 @@ function renderBlocks(blocks, refs, tight) {
       }
       case 'table': {
         out += '<table>\n<thead>\n<tr>\n';
-        for (let c = 0; c < b.head.length; c++) {
-          out += b.align[c] ? '<th align="' + b.align[c] + '">' + parseInline(b.head[c], refs) + '</th>\n'
-            : '<th>' + parseInline(b.head[c], refs) + '</th>\n';
+        for (let col = 0; col < b.head.length; col++) {
+          const alignAttr = b.align[col] ? ' align="' + b.align[col] + '"' : '';
+          out += '<th' + alignAttr + '>' + parseInline(b.head[col], refs) + '</th>\n';
         }
         out += '</tr>\n</thead>\n';
         if (b.rows.length > 0) {
           out += '<tbody>';
           for (const row of b.rows) {
             out += '<tr>\n';
-            for (let c = 0; c < b.head.length; c++) {
-              const cell = row[c] !== undefined ? row[c] : '';
-              out += b.align[c] ? '<td align="' + b.align[c] + '">' + parseInline(cell, refs) + '</td>\n'
-                : '<td>' + parseInline(cell, refs) + '</td>\n';
+            for (let col = 0; col < b.head.length; col++) {
+              const cell = row[col] !== undefined ? row[col] : '';
+              const alignAttr = b.align[col] ? ' align="' + b.align[col] + '"' : '';
+              out += '<td' + alignAttr + '>' + parseInline(cell, refs) + '</td>\n';
             }
             out += '</tr>\n';
           }
@@ -2836,15 +2840,15 @@ function renderParaText(text, refs) {
 function renderListItem(item, refs, tight) {
   let out = '<li>';
   if (item.length > 0 && item[0].t === 'para') {
-    const m = /^\[( |x|X)\]([ \t]|$)/.exec(item[0].text);
-    if (m) {
-      const checked = m[1] === 'x' || m[1] === 'X';
-      const rest = item[0].text.slice(3);
-      const checkbox = checked
+    const check = /^\[( |x|X)\]([ \t]|$)/.exec(item[0].text);
+    if (check) {
+      const isChecked = check[1] === 'x' || check[1] === 'X';
+      const afterCheck = item[0].text.slice(3);
+      const box = isChecked
         ? '<input checked="" disabled="" type="checkbox">'
         : '<input disabled="" type="checkbox">';
-      if (tight) out += checkbox + parseInline(rest, refs);
-      else out += '<p>' + checkbox + parseInline(rest, refs) + '</p>\n';
+      if (tight) out += box + parseInline(afterCheck, refs);
+      else out += '<p>' + box + parseInline(afterCheck, refs) + '</p>\n';
       out += renderBlocks(item.slice(1), refs, tight);
       out += '</li>\n';
       return out;
@@ -2858,11 +2862,12 @@ function renderListItem(item, refs, tight) {
 /* ---------------- entry point ---------------- */
 
 export function parse(markdown) {
+  // document-level inline state starts fresh for every document
   inLink = false;
   inRawBlock = false;
   const src = String(markdown).replace(/\r\n?/g, '\n');
-  const lines = splitLines(src);
+  const docLines = splitLines(src);
   const refs = new Map();
-  const { blocks } = parseBlocks(lines, 0, lines.length, refs, false);
+  const { blocks } = parseBlocks(docLines, 0, docLines.length, refs, false);
   return renderBlocks(blocks, refs, false);
 }
